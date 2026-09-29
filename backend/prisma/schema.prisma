@@ -1,0 +1,286 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+
+// ============================================
+// ENUMS — map directly to PostgreSQL ENUMs
+// ============================================
+
+enum GameStatus {
+  waiting
+  active
+  completed
+  aborted
+}
+
+enum GameResult{
+  white_win
+  black_win
+  draw
+}
+
+enum ResultReason{
+  checkmate
+  resignation
+  stalemate
+  timeout
+  server_crash  
+  draw_agreement
+  insufficient_material
+  threefold_repetition
+  fifty_move_rule
+  abandonment
+}
+
+// ============================================
+// USER
+// ============================================
+
+model User {
+  id               String   @id @default(uuid()) @db.Uuid
+  username         String   @unique @db.VarChar(30)
+  email            String   @unique @db.VarChar(255)
+  passwordHash     String   @db.VarChar(255)
+  displayName String? @db.VarChar(50)
+  rating           Int      @default(1200)
+  ratingDeviation  Int      @default(350)
+
+  gamesPlayed      Int      @default(0)
+  gamesWon         Int      @default(0)
+  gamesDrawn       Int      @default(0)
+  gamesLost        Int      @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  whiteGames       Game[]   @relation("WhitePlayer")
+  blackGames       Game[]   @relation("BlackPlayer")
+
+  analyses         GameAnalysis[]
+  studyPlans       StudyPlan[]
+
+  @@index([rating])
+}
+
+
+// ============================================
+// GAME
+// ============================================
+
+model Game {
+  id                String        @id @default(uuid()) @db.Uuid
+
+  whitePlayerId     String        @db.Uuid
+  blackPlayerId     String        @db.Uuid
+
+  status            GameStatus    @default(waiting)
+  result            GameResult?
+  resultReason      ResultReason?
+
+  timeControl       Int
+  increment         Int           @default(0)
+
+  pgn               String?
+  finalFen          String?       @db.VarChar(100)
+
+  whiteRatingBefore Int?
+  whiteRatingAfter  Int?
+  blackRatingBefore Int?
+  blackRatingAfter  Int?
+
+  startedAt         DateTime?
+  endedAt           DateTime?
+  createdAt         DateTime      @default(now())
+
+  whitePlayer       User          @relation("WhitePlayer", fields: [whitePlayerId], references: [id])
+  blackPlayer       User          @relation("BlackPlayer", fields: [blackPlayerId], references: [id])
+
+  moves             Move[]
+  snapshots         GameSnapshot[]
+  analyses          GameAnalysis[]
+
+  @@index([whitePlayerId])
+  @@index([blackPlayerId])
+  @@index([status])
+  @@index([createdAt(sort: Desc)])
+}
+
+// ============================================
+// MOVE — batch-inserted on game end, not during play
+// ============================================
+
+model Move {
+  id              String   @id @default(uuid()) @db.Uuid
+  gameId          String   @db.Uuid
+
+  moveNumber      Int
+  color           String   @db.Char(1)
+  san             String   @db.VarChar(10)
+  uci             String   @db.VarChar(10)
+
+  fenAfter        String   @db.VarChar(100)
+  timeRemainingMs Int
+
+  createdAt       DateTime @default(now())
+
+  game            Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  @@index([gameId, moveNumber, color])
+}
+
+// ============================================
+// GAME SNAPSHOT — checkpoint every 10 moves, deleted on game end
+// ============================================
+
+model GameSnapshot {
+  id            String   @id @default(uuid()) @db.Uuid
+  gameId        String   @db.Uuid
+
+  moveCount     Int
+  fen           String   @db.VarChar(100)
+  movesUci      String
+  whiteTimeMs   Int
+  blackTimeMs   Int
+  turn          String   @db.Char(1)
+
+  createdAt     DateTime @default(now())
+
+  game          Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+
+  @@index([gameId, moveCount(sort: Desc)])
+}
+
+// ============================================
+// ANALYSIS ENUMS
+// ============================================
+
+enum AnalysisStatus {
+  pending
+  processing
+  completed
+  failed
+}
+
+enum MoveCategory {
+  brilliant
+  best
+  excellent
+  good
+  inaccuracy
+  mistake
+  blunder
+  book
+  forced
+}
+
+// ============================================
+// GAME ANALYSIS — one per user per game
+// ============================================
+
+model GameAnalysis {
+  id              String         @id @default(uuid()) @db.Uuid
+  gameId          String         @db.Uuid
+  requestedBy     String         @db.Uuid
+
+  status          AnalysisStatus @default(pending)
+  engineDepth     Int            @default(20)
+
+  accuracyWhite   Float?
+  accuracyBlack   Float?
+
+  brilliantCount  Int            @default(0)
+  bestCount       Int            @default(0)
+  excellentCount  Int            @default(0)
+  goodCount       Int            @default(0)
+  inaccuracyCount Int            @default(0)
+  mistakeCount    Int            @default(0)
+  blunderCount    Int            @default(0)
+
+  startedAt       DateTime?
+  completedAt     DateTime?
+  createdAt       DateTime       @default(now())
+
+  game            Game           @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  requestedByUser User           @relation(fields: [requestedBy], references: [id])
+  moveAnalyses    MoveAnalysis[]
+
+  @@unique([gameId, requestedBy])
+}
+
+// ============================================
+// MOVE ANALYSIS — Stockfish verdict per move
+// ============================================
+
+model MoveAnalysis {
+  id                String       @id @default(uuid()) @db.Uuid
+  gameAnalysisId    String       @db.Uuid
+
+  moveNumber        Int
+  color             String       @db.Char(1)
+  san               String       @db.VarChar(10)
+
+  fenBefore         String       @db.VarChar(100)
+  fenAfter          String       @db.VarChar(100)
+
+  engineBestMove    String       @db.VarChar(10)
+  engineBestSan     String       @db.VarChar(10)
+  evalBeforeCp      Int
+  evalAfterCp       Int
+  engineLine        String?
+
+  winProbBefore     Float
+  winProbAfter      Float
+  expectedScoreLoss Float
+
+  materialDelta     Int?
+
+  category          MoveCategory
+
+  createdAt         DateTime     @default(now())
+
+  gameAnalysis      GameAnalysis @relation(fields: [gameAnalysisId], references: [id], onDelete: Cascade)
+
+  @@index([gameAnalysisId, moveNumber])
+  @@unique([gameAnalysisId, moveNumber, color])
+}
+
+// ============================================
+// STUDY PLAN — AI-generated improvement plan
+// ============================================
+
+enum StudyPlanStatus {
+  processing
+  completed
+  failed
+}
+
+model StudyPlan {
+  id              String          @id @default(uuid()) @db.Uuid
+  userId          String          @db.Uuid
+
+  status          StudyPlanStatus @default(processing)
+
+  gamesAnalyzed   Int
+  dateRangeStart  DateTime
+  dateRangeEnd    DateTime
+
+  inputSummary    Json
+  planContent     Json?
+  modelUsed       String?         @db.VarChar(50)
+
+  createdAt       DateTime        @default(now())
+
+  user            User            @relation(fields: [userId], references: [id])
+
+  @@index([userId, createdAt(sort: Desc)])
+}
