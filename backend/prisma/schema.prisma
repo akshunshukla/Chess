@@ -12,7 +12,6 @@ datasource db {
   provider = "postgresql"
 }
 
-
 // ============================================
 // ENUMS — map directly to PostgreSQL ENUMs
 // ============================================
@@ -24,18 +23,18 @@ enum GameStatus {
   aborted
 }
 
-enum GameResult{
+enum GameResult {
   white_win
   black_win
   draw
 }
 
-enum ResultReason{
+enum ResultReason {
   checkmate
   resignation
   stalemate
   timeout
-  server_crash  
+  server_crash
   draw_agreement
   insufficient_material
   threefold_repetition
@@ -43,74 +42,84 @@ enum ResultReason{
   abandonment
 }
 
+enum Color {
+  w
+  b
+}
+
+enum AnalysisInputKind {
+  pgn
+  fen
+}
+
 // ============================================
 // USER
 // ============================================
 
 model User {
-  id               String   @id @default(uuid()) @db.Uuid
-  username         String   @unique @db.VarChar(30)
-  email            String   @unique @db.VarChar(255)
-  passwordHash     String   @db.VarChar(255)
-  displayName String? @db.VarChar(50)
-  rating           Int      @default(1200)
-  ratingDeviation  Int      @default(350)
+  id           String  @id @default(uuid()) @db.Uuid
+  username     String  @unique @db.VarChar(30)
+  email        String  @unique @db.VarChar(255)
+  passwordHash String  @db.VarChar(255)
+  displayName  String? @db.VarChar(50)
+  rating       Int     @default(1200)
 
-  gamesPlayed      Int      @default(0)
-  gamesWon         Int      @default(0)
-  gamesDrawn       Int      @default(0)
-  gamesLost        Int      @default(0)
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  gamesPlayed Int      @default(0)
+  gamesWon    Int      @default(0)
+  gamesDrawn  Int      @default(0)
+  gamesLost   Int      @default(0)
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
 
-  whiteGames       Game[]   @relation("WhitePlayer")
-  blackGames       Game[]   @relation("BlackPlayer")
+  whiteGames Game[] @relation("WhitePlayer")
+  blackGames Game[] @relation("BlackPlayer")
 
-  analyses         GameAnalysis[]
-  studyPlans       StudyPlan[]
+  analyses       GameAnalysis[]
+  studyPlans     StudyPlan[]
+  analysisInputs AnalysisInput[]
 
   @@index([rating])
 }
-
 
 // ============================================
 // GAME
 // ============================================
 
 model Game {
-  id                String        @id @default(uuid()) @db.Uuid
+  id String @id @default(uuid()) @db.Uuid
 
-  whitePlayerId     String        @db.Uuid
-  blackPlayerId     String        @db.Uuid
+  whitePlayerId String @db.Uuid
+  blackPlayerId String @db.Uuid
 
-  status            GameStatus    @default(waiting)
-  result            GameResult?
-  resultReason      ResultReason?
+  status       GameStatus    @default(waiting)
+  result       GameResult?
+  resultReason ResultReason?
 
-  timeControl       Int
-  increment         Int           @default(0)
+  timeControlSeconds Int @default(600) @map("timeControl")
+  incrementSeconds   Int @default(0) @map("increment")
 
-  pgn               String?
-  finalFen          String?       @db.VarChar(100)
+  pgn      String?
+  finalFen String?
 
   whiteRatingBefore Int?
   whiteRatingAfter  Int?
   blackRatingBefore Int?
   blackRatingAfter  Int?
 
-  startedAt         DateTime?
-  endedAt           DateTime?
-  createdAt         DateTime      @default(now())
+  startedAt DateTime? @db.Timestamptz(3)
+  endedAt   DateTime? @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
 
-  whitePlayer       User          @relation("WhitePlayer", fields: [whitePlayerId], references: [id])
-  blackPlayer       User          @relation("BlackPlayer", fields: [blackPlayerId], references: [id])
+  whitePlayer User @relation("WhitePlayer", fields: [whitePlayerId], references: [id])
+  blackPlayer User @relation("BlackPlayer", fields: [blackPlayerId], references: [id])
 
-  moves             Move[]
-  snapshots         GameSnapshot[]
-  analyses          GameAnalysis[]
+  moves          Move[]
+  snapshots      GameSnapshot[]
+  analyses       GameAnalysis[]
+  studyPlanGames StudyPlanGame[]
 
-  @@index([whitePlayerId])
-  @@index([blackPlayerId])
+  @@index([whitePlayerId, status, endedAt(sort: Desc), id(sort: Desc)])
+  @@index([blackPlayerId, status, endedAt(sort: Desc), id(sort: Desc)])
   @@index([status])
   @@index([createdAt(sort: Desc)])
 }
@@ -120,22 +129,22 @@ model Game {
 // ============================================
 
 model Move {
-  id              String   @id @default(uuid()) @db.Uuid
-  gameId          String   @db.Uuid
+  id     String @id @default(uuid()) @db.Uuid
+  gameId String @db.Uuid
 
-  moveNumber      Int
-  color           String   @db.Char(1)
-  san             String   @db.VarChar(10)
-  uci             String   @db.VarChar(10)
+  moveNumber Int
+  color      Color
+  san        String @db.VarChar(10)
+  uci        String @db.VarChar(10)
 
-  fenAfter        String   @db.VarChar(100)
+  fenAfter        String
   timeRemainingMs Int
 
-  createdAt       DateTime @default(now())
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
 
-  game            Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  game Game @relation(fields: [gameId], references: [id], onDelete: Cascade)
 
-  @@index([gameId, moveNumber, color])
+  @@unique([gameId, moveNumber, color])
 }
 
 // ============================================
@@ -143,21 +152,21 @@ model Move {
 // ============================================
 
 model GameSnapshot {
-  id            String   @id @default(uuid()) @db.Uuid
-  gameId        String   @db.Uuid
+  id     String @id @default(uuid()) @db.Uuid
+  gameId String @db.Uuid
 
-  moveCount     Int
-  fen           String   @db.VarChar(100)
-  movesUci      String
-  whiteTimeMs   Int
-  blackTimeMs   Int
-  turn          String   @db.Char(1)
+  moveCount   Int
+  fen         String
+  movesUci    String
+  whiteTimeMs Int
+  blackTimeMs Int
+  turn        Color
 
-  createdAt     DateTime @default(now())
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
 
-  game          Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  game Game @relation(fields: [gameId], references: [id], onDelete: Cascade)
 
-  @@index([gameId, moveCount(sort: Desc)])
+  @@unique([gameId, moveCount])
 }
 
 // ============================================
@@ -184,37 +193,74 @@ enum MoveCategory {
 }
 
 // ============================================
-// GAME ANALYSIS — one per user per game
+// IMPORTED INPUT — keeps external players out of platform accounts and Elo
 // ============================================
 
+model AnalysisInput {
+  id          String            @id @default(uuid()) @db.Uuid
+  ownerId     String            @db.Uuid
+  kind        AnalysisInputKind
+
+  pgn         String?
+
+  startingFen String
+  metadata    Json?
+  createdAt   DateTime          @default(now()) @db.Timestamptz(3)
+
+  owner    User           @relation(fields: [ownerId], references: [id])
+  analyses GameAnalysis[]
+
+  @@index([ownerId, createdAt(sort: Desc)])
+}
+
 model GameAnalysis {
-  id              String         @id @default(uuid()) @db.Uuid
-  gameId          String         @db.Uuid
-  requestedBy     String         @db.Uuid
+  id              String  @id @default(uuid()) @db.Uuid
+  gameId          String? @db.Uuid
+  analysisInputId String? @db.Uuid
+  requestedBy     String  @db.Uuid
 
-  status          AnalysisStatus @default(pending)
-  engineDepth     Int            @default(20)
+  status                AnalysisStatus @default(pending)
+  engineDepth           Int            @default(20)
+  engineVersion         String?
+  classificationVersion String         @default("review-v1")
 
-  accuracyWhite   Float?
-  accuracyBlack   Float?
+  accuracyWhite Float?
+  accuracyBlack Float?
 
-  brilliantCount  Int            @default(0)
-  bestCount       Int            @default(0)
-  excellentCount  Int            @default(0)
-  goodCount       Int            @default(0)
-  inaccuracyCount Int            @default(0)
-  mistakeCount    Int            @default(0)
-  blunderCount    Int            @default(0)
+  whiteBrilliantCount  Int @default(0)
+  whiteBestCount       Int @default(0)
+  whiteExcellentCount  Int @default(0)
+  whiteGoodCount       Int @default(0)
+  whiteInaccuracyCount Int @default(0)
+  whiteMistakeCount    Int @default(0)
+  whiteBlunderCount    Int @default(0)
+  blackBrilliantCount  Int @default(0)
+  blackBestCount       Int @default(0)
+  blackExcellentCount  Int @default(0)
+  blackGoodCount       Int @default(0)
+  blackInaccuracyCount Int @default(0)
+  blackMistakeCount    Int @default(0)
+  blackBlunderCount    Int @default(0)
 
-  startedAt       DateTime?
-  completedAt     DateTime?
-  createdAt       DateTime       @default(now())
+  attemptCount Int      @default(0)
+  lastError    String?
+  updatedAt    DateTime @updatedAt @db.Timestamptz(3)
 
-  game            Game           @relation(fields: [gameId], references: [id], onDelete: Cascade)
-  requestedByUser User           @relation(fields: [requestedBy], references: [id])
-  moveAnalyses    MoveAnalysis[]
+  startedAt   DateTime? @db.Timestamptz(3)
+  completedAt DateTime? @db.Timestamptz(3)
+  createdAt   DateTime  @default(now()) @db.Timestamptz(3)
+
+  game             Game?             @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  analysisInput    AnalysisInput?    @relation(fields: [analysisInputId], references: [id], onDelete: Cascade)
+  requestedByUser  User              @relation(fields: [requestedBy], references: [id])
+  moveAnalyses     MoveAnalysis[]
+  positionAnalysis PositionAnalysis?
+  studyPlanGames   StudyPlanGame[]
 
   @@unique([gameId, requestedBy])
+  @@unique([analysisInputId, requestedBy])
+  @@index([requestedBy, status, completedAt(sort: Desc)])
+  @@index([status, startedAt])
 }
 
 // ============================================
@@ -222,36 +268,59 @@ model GameAnalysis {
 // ============================================
 
 model MoveAnalysis {
-  id                String       @id @default(uuid()) @db.Uuid
-  gameAnalysisId    String       @db.Uuid
+  id             String @id @default(uuid()) @db.Uuid
+  gameAnalysisId String @db.Uuid
 
-  moveNumber        Int
-  color             String       @db.Char(1)
-  san               String       @db.VarChar(10)
+  moveNumber Int
+  color      Color
+  san        String @db.VarChar(10)
 
-  fenBefore         String       @db.VarChar(100)
-  fenAfter          String       @db.VarChar(100)
+  fenBefore String
+  fenAfter  String
 
-  engineBestMove    String       @db.VarChar(10)
-  engineBestSan     String       @db.VarChar(10)
-  evalBeforeCp      Int
-  evalAfterCp       Int
-  engineLine        String?
+  engineBestMove String  @db.VarChar(10)
+  engineBestSan  String  @db.VarChar(10)
 
-  winProbBefore     Float
-  winProbAfter      Float
-  expectedScoreLoss Float
+  evalBeforeCp   Int?
+  evalAfterCp    Int?
+  mateBefore     Int?
+  mateAfter      Int?
+  engineLine     String?
 
-  materialDelta     Int?
+  expectedScoreBefore Float
+  expectedScoreAfter  Float
+  expectedScoreLoss   Float
 
-  category          MoveCategory
+  materialDelta                 Int?
 
-  createdAt         DateTime     @default(now())
+  sacrificeVerified             Boolean @default(false)
+  sacrificeValue                Int?
+  expectedScoreWithoutSacrifice Float?
 
-  gameAnalysis      GameAnalysis @relation(fields: [gameAnalysisId], references: [id], onDelete: Cascade)
+  category MoveCategory
 
-  @@index([gameAnalysisId, moveNumber])
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  gameAnalysis GameAnalysis @relation(fields: [gameAnalysisId], references: [id], onDelete: Cascade)
+
   @@unique([gameAnalysisId, moveNumber, color])
+}
+
+model PositionAnalysis {
+  id                 String   @id @default(uuid()) @db.Uuid
+  gameAnalysisId     String   @unique @db.Uuid
+  fen                String
+  evalCp             Int?
+  mateIn             Int?
+
+  expectedScoreWhite Float
+
+  bestMoveUci        String?  @db.VarChar(10)
+  bestMoveSan        String?  @db.VarChar(10)
+  engineLine         String?
+  createdAt          DateTime @default(now()) @db.Timestamptz(3)
+
+  gameAnalysis GameAnalysis @relation(fields: [gameAnalysisId], references: [id], onDelete: Cascade)
 }
 
 // ============================================
@@ -265,22 +334,44 @@ enum StudyPlanStatus {
 }
 
 model StudyPlan {
-  id              String          @id @default(uuid()) @db.Uuid
-  userId          String          @db.Uuid
+  id     String @id @default(uuid()) @db.Uuid
+  userId String @db.Uuid
 
-  status          StudyPlanStatus @default(processing)
+  status StudyPlanStatus @default(processing)
 
-  gamesAnalyzed   Int
-  dateRangeStart  DateTime
-  dateRangeEnd    DateTime
+  requestedAt    DateTime @db.Timestamptz(3)
+  gamesSelected  Int
+  gamesAnalyzed  Int      @default(0)
+  dateRangeStart DateTime @db.Timestamptz(3)
+  dateRangeEnd   DateTime @db.Timestamptz(3)
 
-  inputSummary    Json
-  planContent     Json?
-  modelUsed       String?         @db.VarChar(50)
+  inputSummary Json?
+  planContent  Json?
+  modelUsed    String? @db.VarChar(50)
 
-  createdAt       DateTime        @default(now())
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
 
-  user            User            @relation(fields: [userId], references: [id])
+  user          User            @relation(fields: [userId], references: [id])
+  selectedGames StudyPlanGame[]
+  lastError     String?
+  completedAt   DateTime?       @db.Timestamptz(3)
 
-  @@index([userId, createdAt(sort: Desc)])
+  @@index([userId, requestedAt(sort: Desc)])
+}
+
+model StudyPlanGame {
+  studyPlanId    String  @db.Uuid
+  gameId         String  @db.Uuid
+  position       Int
+  playerColor    Color
+  gameAnalysisId String? @db.Uuid
+
+  studyPlan    StudyPlan     @relation(fields: [studyPlanId], references: [id], onDelete: Cascade)
+  game         Game          @relation(fields: [gameId], references: [id], onDelete: Restrict)
+  gameAnalysis GameAnalysis? @relation(fields: [gameAnalysisId], references: [id], onDelete: SetNull)
+
+  @@id([studyPlanId, gameId])
+  @@unique([studyPlanId, position])
+  @@index([gameId])
+  @@index([gameAnalysisId])
 }
