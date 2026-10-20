@@ -8,6 +8,7 @@ import { hashPassword, verifyPassword } from "../utils/password.ts";
 import {
   verifyAccessTokenClaims,
   verifyRefreshToken,
+  type AccessTokenClaims,
 } from "../utils/tokens.ts";
 import { HttpError } from "../utils/errors.ts";
 import {
@@ -94,7 +95,15 @@ export async function authenticateUser(accessToken: string) {
   } catch {
     throw new HttpError(401, "Unauthorised");
   }
-  if (!(await isSessionActive(claims)))
-    throw new HttpError(401, "Unauthorised");
+  await assertSessionActive(claims);
   return claims;
+}
+
+export async function assertSessionActive(
+  claims: AccessTokenClaims,
+): Promise<void> {
+  const active = await isSessionActive(claims);
+  if (!active || claims.expiresAt <= Math.floor(Date.now() / 1000)) {
+    throw new HttpError(401, "Session expired or revoked");
+  }
 }
