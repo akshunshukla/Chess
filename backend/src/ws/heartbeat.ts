@@ -1,21 +1,16 @@
 import { WebSocket, type WebSocketServer } from "ws";
+import { pingWithLatency, trackLatency } from "./latency.ts";
 
 export function startHeartbeat(wss: WebSocketServer) {
-  const awaitingPong = new WeakSet<WebSocket>();
-
   wss.on("connection", (socket) => {
-    socket.on("pong", () => awaitingPong.delete(socket));
+    trackLatency(socket);
+    if (!pingWithLatency(socket)) socket.terminate();
   });
 
   const interval = setInterval(() => {
     for (const socket of wss.clients) {
       if (socket.readyState !== WebSocket.OPEN) continue;
-      if (awaitingPong.has(socket)) {
-        socket.terminate();
-        continue;
-      }
-      awaitingPong.add(socket);
-      socket.ping();
+      if (!pingWithLatency(socket)) socket.terminate();
     }
   }, 30000);
   interval.unref();

@@ -278,7 +278,11 @@ export class MatchmakingService {
       if (game.status !== "waiting") {
         if (game.status === "aborted")
           await this.cancel(reservation, "abandonment");
-        else await finishReservation(reservation);
+        else {
+          if (game.status === "active") await this.hooks.activate(game.id);
+          this.matched(reservation);
+          await finishReservation(reservation);
+        }
         return;
       }
       if (!(await initializeGame(reservation)))
@@ -306,6 +310,8 @@ export class MatchmakingService {
       }
       // Notification is at least once: an uncertain finalization retries the
       // same match ID instead of creating a second game.
+      await this.hooks.activate(game.id);
+      this.matched(reservation);
       await finishReservation(reservation);
     } catch (error) {
       if (error instanceof GameUnavailableError) {
@@ -335,7 +341,7 @@ export class MatchmakingService {
         reservation.black.userId,
       );
     await finishReservation(reservation);
-    if (!aborted) return;
+    if (!aborted) { this.matched(reservation); return; }
     for (const player of [reservation.white, reservation.black]) {
       this.hooks.send(player.userId, {
         type: "queue:cancelled",
@@ -376,6 +382,13 @@ export class MatchmakingService {
           player.ownerId,
         );
       }
+    }
+  }
+
+  private matched(reservation: Reservation) {
+    for (const player of [reservation.white, reservation.black]) {
+      if (this.intents.get(player.userId)?.ownerId === player.ownerId) this.intents.delete(player.userId);
+      this.candidatePages.delete(player.userId);
     }
   }
 
@@ -496,7 +509,16 @@ export class MatchmakingService {
     return this.enqueue(async () => {
       if (!this.active || !this.hooks.isCurrent(userId, ownerId)) return;
       const game = await getWaitingGame(userId);
-      if (!game || !this.hooks.isCurrent(userId, ownerId)) return;
+      if (!this.hooks.isCurrent(userId, ownerId)) return;
+      if (!game) {
+        const playing = await prisma.game.findFirst({ where: {
+          status: "active", OR: [{ whitePlayerId: userId }, { blackPlayerId: userId }],
+        }, select: { id: true } });
+        if (playing && this.hooks.isCurrent(userId, ownerId) && this.intents.get(userId) === previousIntent) {
+          this.intents.delete(userId);
+        }
+        return;
+      }
       const state = await redisOperation(() => redis.hgetall(gameKey(game.id)));
       if (!this.hooks.isCurrent(userId, ownerId)) return;
       if (

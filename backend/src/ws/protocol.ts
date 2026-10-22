@@ -1,5 +1,7 @@
 import { z } from "zod";
+import { gameMessageSchemas } from "./game.protocol.ts";
 export const clientMessageSchema = z.discriminatedUnion("type", [
+  ...gameMessageSchemas,
   z.strictObject({
     type: z.literal("auth"),
     payload: z.strictObject({ token: z.string().min(1).max(2048) }),

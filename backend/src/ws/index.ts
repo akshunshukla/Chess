@@ -10,6 +10,7 @@ import {
   connectionIdentity,
   closeConnection,
   sendToUser,
+  connectionLag,
 } from "./connectionManager.ts";
 import { startHeartbeat } from "./heartbeat.ts";
 import type { AccessTokenClaims } from "../utils/tokens.ts";
@@ -22,25 +23,30 @@ import {
   serializeQueueTask,
   drainQueueTasks,
 } from "./handler/queue.handler.ts";
-import { MatchmakingService } from "../game/index.ts";
+import { GameError, GameManager, MatchmakingService, serverNow } from "../game/index.ts";
+import { handleGameCommand } from "./handler/game.handler.ts";
+import { createMessageLimiter } from "./tokenBucket.ts";
 
 export function attachWebSocketServer(server: Server) {
+  const validate = async (userId: string, ownerId: string) => {
+    const claims = connectionIdentity(userId, ownerId);
+    if (!claims) return false;
+    try {
+      await assertSessionActive(claims);
+      return isConnectionIdCurrent(userId, ownerId);
+    } catch (error) {
+      if (!(error instanceof HttpError) || error.status !== 401) throw error;
+      closeConnection(userId, ownerId, "Session expired or revoked");
+      return false;
+    }
+  };
+  const games = new GameManager({ send: sendToUser, isCurrent: isConnectionIdCurrent, validate, lag: connectionLag });
   const matchmaking = new MatchmakingService({
     currentOwner: currentConnectionId,
     isCurrent: isConnectionIdCurrent,
     send: sendToUser,
-    validate: async (userId, ownerId) => {
-      const claims = connectionIdentity(userId, ownerId);
-      if (!claims) return false;
-      try {
-        await assertSessionActive(claims);
-        return isConnectionIdCurrent(userId, ownerId);
-      } catch (error) {
-        if (!(error instanceof HttpError) || error.status !== 401) throw error;
-        closeConnection(userId, ownerId, "Session expired or revoked");
-        return false;
-      }
-    },
+    validate,
+    activate: (id) => games.startGame(id),
   });
   const wss = new WebSocketServer({
     server,
@@ -52,13 +58,17 @@ export function attachWebSocketServer(server: Server) {
     console.error("Websocket server error", error);
   });
   wss.on("connection", (socket) => {
+    const consumeMessage = createMessageLimiter();
     const connectionId = randomUUID();
     console.log("Websocket connected");
     let identity: AccessTokenClaims | undefined;
     const authenticate = createSocketAuth(socket, (claims) => {
       identity = claims;
       registerConnection(claims.userId, socket, connectionId, claims);
-      void serializeQueueTask(claims.userId, () => matchmaking.resume(claims.userId, connectionId))
+      void serializeQueueTask(claims.userId, async () => {
+        await matchmaking.resume(claims.userId, connectionId);
+        await games.resume(claims.userId, connectionId);
+      })
         .catch((error) => {
           console.error("Matchmaking reconnect failed:", error);
           if (isCurrentConnection(claims.userId, socket)) socket.close(1011, "Matchmaking unavailable");
@@ -70,8 +80,15 @@ export function attachWebSocketServer(server: Server) {
       socket.once("close", () => clearTimeout(expiryTimer));
     });
     socket.on("message", async (data, isBinary) => {
+      const receivedAt = serverNow();
       try {
         if (socket.readyState !== WebSocket.OPEN) return;
+        const limit = consumeMessage();
+        if (limit !== "ok") {
+          socket.send(JSON.stringify({ type: "error", payload: { code: "RATE_LIMITED", message: "Too many messages" } }));
+          if (limit === "close") socket.close(1008, "Message rate exceeded");
+          return;
+        }
         if (isBinary) {
           socket.close(1003, "Text messages only");
           return;
@@ -110,6 +127,10 @@ export function attachWebSocketServer(server: Server) {
           return;
         }
         const actor = identity;
+        if (message.type !== "queue:join" && message.type !== "queue:leave") {
+          await handleGameCommand(games, actor.userId, connectionId, message, receivedAt);
+          return;
+        }
         matchmaking.requested(actor.userId, connectionId, message.type);
         await serializeQueueTask(actor.userId, async () => {
           if (!isCurrentConnection(actor.userId, socket)) return;
@@ -129,10 +150,15 @@ export function attachWebSocketServer(server: Server) {
           matchmaking.kick();
           if (message.type === "queue:join" && response.payload.status === "busy") {
             await matchmaking.resume(actor.userId, connectionId);
+            await games.resume(actor.userId, connectionId);
           }
         });
       } catch (error) {
         if (socket.readyState !== WebSocket.OPEN) return;
+        if (error instanceof GameError) {
+          socket.send(JSON.stringify({ type: "error", payload: { code: error.code, message: error.message } }));
+          return;
+        }
         if (error instanceof HttpError && error.status === 401) {
           socket.close(1008, "Session expired or revoked");
           return;
@@ -169,15 +195,18 @@ export function attachWebSocketServer(server: Server) {
       });
     });
   });
+  games.start();
   matchmaking.start();
-  wss.once("close", () => matchmaking.pause());
+  wss.once("close", () => { matchmaking.pause(); games.pause(); });
   return {
     wss,
-    pauseMatchmaking: () => matchmaking.pause(),
+    pauseMatchmaking: () => { matchmaking.pause(); games.pause(); },
     stopMatchmaking: async () => {
       matchmaking.pause();
+      games.pause();
       await drainQueueTasks();
       await matchmaking.stop();
+      await games.stop();
     },
   };
 }

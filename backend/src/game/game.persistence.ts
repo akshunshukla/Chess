@@ -1,0 +1,112 @@
+import { prisma } from "../db/index.ts";
+import type { Prisma } from "../generated/prisma/client.ts";
+import type { WaitingGame } from "./GameService.ts";
+import { INITIAL_FEN } from "./matchmaking.types.ts";
+import { GameError, type GameState } from "./game.types.ts";
+import { serverNow } from "./game.clock.ts";
+
+const profile = { id: true, username: true, displayName: true, rating: true } as const;
+const players = { whitePlayer: { select: profile }, blackPlayer: { select: profile } } as const;
+const transactionOptions = { maxWait: 5000, timeout: 10000 };
+
+async function lockGame(tx: Prisma.TransactionClient, gameId: string) {
+  await tx.$queryRaw`SELECT id FROM "Game" WHERE id = ${gameId}::uuid FOR UPDATE`;
+  return tx.game.findUnique({ where: { id: gameId } });
+}
+
+export async function activateGameRecord(id: string): Promise<{
+  game: WaitingGame; startedAt: number;
+} | null> {
+  return prisma.$transaction(async (tx) => {
+    const original = await tx.game.findUnique({ where: { id } });
+    if (!original) return null;
+    for (const playerId of [original.whitePlayerId, original.blackPlayerId].sort()) {
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${playerId}::text, 0))::text`;
+    }
+    await lockGame(tx, id);
+    let game = await tx.game.findUnique({ where: { id }, include: players });
+    if (!game || (game.status !== "waiting" && game.status !== "active")) return null;
+    if (game.status === "waiting") {
+      const startedAt = new Date(serverNow());
+      await tx.game.update({ where: { id }, data: { status: "active", startedAt } });
+      const checkpoint = {
+        gameId: id, moveCount: 0, fen: INITIAL_FEN, movesUci: "", turn: "w" as const,
+        whiteTimeMs: game.timeControlSeconds * 1000, blackTimeMs: game.timeControlSeconds * 1000,
+      };
+      await tx.gameSnapshot.create({ data: checkpoint });
+      game = { ...game, status: "active", startedAt };
+    }
+    if (!game.startedAt) throw new GameError("GAME_STATE_INVALID", "Active game has no start time");
+    return { game, startedAt: game.startedAt.getTime() };
+  }, transactionOptions);
+}
+
+export async function saveGameSnapshot(state: GameState): Promise<void> {
+  if (state.status !== "active") return;
+  await prisma.$transaction(async (tx) => {
+    const game = await lockGame(tx, state.id);
+    if (!game) throw new GameError("GAME_NOT_FOUND", "Game record is missing");
+    if (game.status !== "active") return;
+    const checkpoint = {
+      gameId: state.id, moveCount: state.moveCount, fen: state.fen,
+      movesUci: state.moves.map((move) => move.uci).join(" "), turn: state.turn,
+      whiteTimeMs: Math.max(0, Math.ceil(state.whiteTimeMs)),
+      blackTimeMs: Math.max(0, Math.ceil(state.blackTimeMs)),
+    };
+    await tx.gameSnapshot.upsert({
+      where: { gameId_moveCount: { gameId: state.id, moveCount: state.moveCount } },
+      create: checkpoint, update: {},
+    });
+  }, transactionOptions);
+}
+
+export async function finalizeGameRecord(state: GameState, pgn: string): Promise<void> {
+  const { outcome, endedAt } = state;
+  if (state.status !== "completed" || !outcome || endedAt === undefined) {
+    throw new GameError("GAME_STATE_INVALID", "Completed game requires an outcome and end time");
+  }
+  if (state.moves.length !== state.moveCount) {
+    throw new GameError("GAME_STATE_INVALID", "Cannot save incomplete move history");
+  }
+  await prisma.$transaction(async (tx) => {
+    const game = await lockGame(tx, state.id);
+    if (!game) throw new GameError("GAME_NOT_FOUND", "Game record is missing");
+    if (game.whitePlayerId !== state.whiteId || game.blackPlayerId !== state.blackId) {
+      throw new GameError("GAME_STATE_INVALID", "Stored players do not match game state");
+    }
+    if (game.status === "completed") return;
+    if (game.status !== "active") throw new GameError("GAME_NOT_ACTIVE", "Cannot complete an inactive game");
+    await tx.game.update({ where: { id: state.id }, data: {
+      status: "completed", result: outcome.result, resultReason: outcome.reason,
+      finalFen: state.fen, pgn, endedAt: new Date(endedAt),
+    } });
+    if (state.moves.length) {
+      await tx.move.createMany({ data: state.moves.map((move, index) => ({
+        gameId: state.id, moveNumber: Math.floor(index / 2) + 1, color: move.color,
+        san: move.san, uci: move.uci, fenAfter: move.fenAfter,
+        timeRemainingMs: Math.max(0, Math.ceil(move.timeRemainingMs)),
+        createdAt: new Date(move.playedAt),
+      })) });
+    }
+    for (const playerId of [state.whiteId, state.blackId].sort()) {
+      const won = outcome.result === (playerId === state.whiteId ? "white_win" : "black_win");
+      const counter = outcome.result === "draw" ? "gamesDrawn" : won ? "gamesWon" : "gamesLost";
+      await tx.user.update({ where: { id: playerId }, data: {
+        gamesPlayed: { increment: 1 }, [counter]: { increment: 1 },
+      } });
+    }
+    await tx.gameSnapshot.deleteMany({ where: { gameId: state.id } });
+  }, transactionOptions);
+}
+
+export async function abortActiveGameRecord(id: string): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    const game = await lockGame(tx, id);
+    if (!game || game.status !== "active") return;
+    await tx.game.update({ where: { id }, data: {
+      status: "aborted", result: null, resultReason: "server_crash",
+      endedAt: new Date(Math.max(serverNow(), game.startedAt?.getTime() ?? 0)),
+    } });
+    await tx.gameSnapshot.deleteMany({ where: { gameId: id } });
+  }, transactionOptions);
+}

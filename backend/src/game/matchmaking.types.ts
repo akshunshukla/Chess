@@ -38,6 +38,7 @@ export interface SocketMessage {
 }
 
 export interface MatchmakingHooks {
+  activate(gameId: string): Promise<void>;
   currentOwner(userId: string): string | undefined;
   isCurrent(userId: string, ownerId: string): boolean;
   validate(userId: string, ownerId: string): Promise<boolean>;

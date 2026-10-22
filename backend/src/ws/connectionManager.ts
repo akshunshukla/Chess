@@ -1,9 +1,11 @@
 import { WebSocket } from "ws";
 import type { AccessTokenClaims } from "../utils/tokens.ts";
+import { measuredLag } from "./latency.ts";
 
 const connections = new Map<string, WebSocket>();
 const connectionIds = new WeakMap<WebSocket, string>();
 const identities = new WeakMap<WebSocket, AccessTokenClaims>();
+export const connectionLag = (userId: string) => measuredLag(connections.get(userId));
 
 export function registerConnection(
   userId: string,

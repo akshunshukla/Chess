@@ -3,11 +3,12 @@ import { env } from "./config/env.ts";
 import { prisma } from "./db/prisma.ts";
 import { redis } from "./db/redis.ts";
 import { attachWebSocketServer } from "./ws/index.ts";
-import { recoverMatchmaking } from "./game/index.ts";
+import { recoverGames, recoverMatchmaking } from "./game/index.ts";
 
 const startServer = async () => {
   await prisma.$connect();
   await redis.ping();
+  await recoverGames();
   await recoverMatchmaking();
   const server = app.listen(env.PORT, () => {
     console.log(`♟️  Chess server running on port ${env.PORT}`);
