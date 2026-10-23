@@ -14,6 +14,8 @@ import {
   scheduleGame,
 } from "./game.store.ts";
 import { GameError, type GameState } from "./game.types.ts";
+import { serverNow } from "./game.clock.ts";
+import { ReconnectionManager } from "./ReconnectionManager.ts";
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const participants = {
@@ -98,7 +100,7 @@ async function clearEndedGame(
   );
 }
 
-async function recoverActiveGame(game: RecoveryGame): Promise<void> {
+async function recoverActiveGame(game: RecoveryGame, offlineAt?: number): Promise<void> {
   try {
     let state = await readGame(game.id);
     const startedAt = game.startedAt?.getTime();
@@ -126,6 +128,10 @@ async function recoverActiveGame(game: RecoveryGame): Promise<void> {
     if (state.startedAt !== startedAt || state.status === "waiting")
       invalidState();
     validateHistory(state);
+    if (state.status === "active" && offlineAt !== undefined) {
+      const connections = new ReconnectionManager({ send: () => false, connectedAt: () => undefined });
+      state = await connections.settle(state, offlineAt);
+    }
     if (state.status === "active") {
       await scheduleGame(state);
     } else {
@@ -208,6 +214,7 @@ export async function reconcileActiveGame(id: string): Promise<void> {
 }
 
 export async function recoverGames(): Promise<void> {
+  const offlineAt = serverNow();
   let after: string | undefined;
   while (true) {
     const games = await prisma.game.findMany({
@@ -217,7 +224,7 @@ export async function recoverGames(): Promise<void> {
       include: participants,
     });
     if (!games.length) break;
-    for (const game of games) await recoverActiveGame(game);
+    for (const game of games) await recoverActiveGame(game, offlineAt);
     after = games[games.length - 1]!.id;
   }
   for (const index of Object.values(gameIndexes)) await reconcileIndex(index);

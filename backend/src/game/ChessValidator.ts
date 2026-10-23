@@ -66,7 +66,7 @@ function restoreGame(state: GameState): Chess {
   if (state.status !== "completed" && boardResult) corruptHistory();
   if (state.status === "completed") {
     if (!state.outcome || state.endedAt !== state.lastMoveAt) corruptHistory();
-    const externalEnd = ["timeout", "resignation", "draw_agreement"].includes(
+    const externalEnd = ["timeout", "resignation", "draw_agreement", "abandonment"].includes(
       state.outcome.reason,
     );
     if (

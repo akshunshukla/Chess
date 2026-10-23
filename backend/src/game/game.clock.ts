@@ -1,5 +1,5 @@
 import { performance } from "node:perf_hooks";
-import type { GameState } from "./game.types.ts";
+import { DISCONNECT_GRACE_MS, type GameState } from "./game.types.ts";
 
 export const serverNow = () =>
   Math.floor(performance.timeOrigin + performance.now());
@@ -27,6 +27,9 @@ export function gameResync(state: GameState, at = serverNow()) {
       moveCount: state.moveCount,
       ...gameClocks(state, at),
       drawOfferedBy: state.drawOfferedBy,
+      whiteDisconnectedAt: state.whiteDisconnectedAt,
+      blackDisconnectedAt: state.blackDisconnectedAt,
+      disconnectGraceMs: DISCONNECT_GRACE_MS,
       result: state.outcome?.result,
       reason: state.outcome?.reason,
     },

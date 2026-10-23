@@ -22,7 +22,7 @@ export const gameIndexes = {
   starting: "games:starting",
 } as const;
 export interface Mutation {
-  kind: "move" | "finish" | "offer" | "decline" | "timeout";
+  kind: "move" | "finish" | "offer" | "decline" | "timeout" | "disconnect" | "reconnect" | "abandon";
   actorId?: string;
   at: number;
   move?: ValidatedMove;
@@ -44,6 +44,7 @@ const outcomeSchema = z.object({
     "timeout",
     "resignation",
     "draw_agreement",
+    "abandonment",
   ]),
 });
 const moveSchema = z.object({
@@ -76,10 +77,12 @@ const stateSchema = z.object({
   outcome: outcomeSchema.optional(),
   endedAt: nonnegative.optional(),
   drawOfferedBy: z.string().optional(),
+  whiteDisconnectedAt: nonnegative.optional(),
+  blackDisconnectedAt: nonnegative.optional(),
 });
 const mutationSchema = z
   .object({
-    kind: z.enum(["move", "finish", "offer", "decline", "timeout"]),
+    kind: z.enum(["move", "finish", "offer", "decline", "timeout", "disconnect", "reconnect", "abandon"]),
     actorId: z.string().min(1).optional(),
     at: nonnegative.positive(),
     timeoutResult: z.enum(["white_win", "black_win", "draw"]),
@@ -130,6 +133,8 @@ function parseState(id: string, record: Record<string, string>): GameState {
       endedAt:
         record.ended_at === undefined ? undefined : integer(record.ended_at),
       drawOfferedBy: record.draw_offered_by,
+      whiteDisconnectedAt: record.white_disconnected_at === undefined ? undefined : integer(record.white_disconnected_at),
+      blackDisconnectedAt: record.black_disconnected_at === undefined ? undefined : integer(record.black_disconnected_at),
     });
     if (
       state.whiteId === state.blackId ||
@@ -156,6 +161,11 @@ function parseState(id: string, record: Record<string, string>): GameState {
         throw new Error("Invalid move history");
     }
     const lastMove = state.moves[state.moves.length - 1];
+    for (const disconnectedAt of [state.whiteDisconnectedAt, state.blackDisconnectedAt]) {
+      if (disconnectedAt !== undefined && (state.status !== "active" || disconnectedAt < state.startedAt)) {
+        throw new Error("Invalid disconnect timestamp");
+      }
+    }
     if (
       lastMove &&
       (lastMove.fenAfter !== state.fen ||

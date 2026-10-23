@@ -11,6 +11,7 @@ import {
   closeConnection,
   sendToUser,
   connectionLag,
+  connectionAuthenticatedAt,
 } from "./connectionManager.ts";
 import { startHeartbeat } from "./heartbeat.ts";
 import type { AccessTokenClaims } from "../utils/tokens.ts";
@@ -40,7 +41,8 @@ export function attachWebSocketServer(server: Server) {
       return false;
     }
   };
-  const games = new GameManager({ send: sendToUser, isCurrent: isConnectionIdCurrent, validate, lag: connectionLag });
+  const games = new GameManager({ send: sendToUser, isCurrent: isConnectionIdCurrent,
+    validate, lag: connectionLag, connectedAt: connectionAuthenticatedAt });
   const matchmaking = new MatchmakingService({
     currentOwner: currentConnectionId,
     isCurrent: isConnectionIdCurrent,
@@ -64,10 +66,13 @@ export function attachWebSocketServer(server: Server) {
     let identity: AccessTokenClaims | undefined;
     const authenticate = createSocketAuth(socket, (claims) => {
       identity = claims;
-      registerConnection(claims.userId, socket, connectionId, claims);
+      registerConnection(claims.userId, socket, connectionId, claims, serverNow());
+      void games.resume(claims.userId, connectionId).catch((error) => {
+        console.error("Game reconnect failed:", error);
+        if (isCurrentConnection(claims.userId, socket)) socket.close(1011, "Game unavailable");
+      });
       void serializeQueueTask(claims.userId, async () => {
         await matchmaking.resume(claims.userId, connectionId);
-        await games.resume(claims.userId, connectionId);
       })
         .catch((error) => {
           console.error("Matchmaking reconnect failed:", error);
@@ -184,6 +189,9 @@ export function attachWebSocketServer(server: Server) {
       console.log("WebSocket disconnected:", code);
       const actor = identity;
       if (!actor) return;
+      void games.disconnected(actor.userId, serverNow()).catch((error) => {
+        console.error("Game disconnect handling deferred:", error);
+      });
       // Clear intent immediately, even when another command is awaiting I/O.
       matchmaking.requested(actor.userId, connectionId, "queue:leave");
       void serializeQueueTask(actor.userId, async () => {

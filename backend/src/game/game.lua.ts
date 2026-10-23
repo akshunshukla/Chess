@@ -1,3 +1,5 @@
+import { DISCONNECT_GRACE_MS } from "./game.types.ts";
+
 const helpers = `
 local function fail(code) return redis.error_reply(code) end
 local function snapshot() return redis.call('HGETALL', KEYS[1]) end
@@ -6,7 +8,12 @@ local function number(name) return tonumber(field(name)) end
 local function deadline(id)
   if field('status') == 'active' then
     local clock = field('turn') == 'w' and 'white_time_ms' or 'black_time_ms'
-    redis.call('ZADD', KEYS[4], number('last_move_at') + number(clock) + number('lag_allowance_ms'), id)
+    local due = number('last_move_at') + number(clock) + number('lag_allowance_ms')
+    for _, name in ipairs({'white_disconnected_at', 'black_disconnected_at'}) do
+      local disconnected = number(name)
+      if disconnected then due = math.min(due, disconnected + ${DISCONNECT_GRACE_MS}) end
+    end
+    redis.call('ZADD', KEYS[4], due, id)
     redis.call('ZREM', KEYS[5], id)
   elseif field('status') == 'completed' then
     redis.call('ZREM', KEYS[4], id)
@@ -85,11 +92,25 @@ local at = math.max(m.at, number('last_move_at'))
 local elapsed = at - number('last_move_at')
 local remaining = number(clock) - math.max(0, elapsed - number('lag_allowance_ms'))
 local outcome = nil
+local disconnected = m.actorId == ARGV[3] and 'white_disconnected_at' or 'black_disconnected_at'
 if remaining <= 0 then
   remaining = 0
   outcome = { result = m.timeoutResult, reason = 'timeout' }
 elseif m.kind == 'timeout' then
   return snapshot()
+elseif m.kind == 'disconnect' and field(disconnected) then
+  deadline(ARGV[1])
+  return snapshot()
+elseif m.kind == 'reconnect' and not field(disconnected) then
+  return snapshot()
+elseif m.kind == 'abandon' then
+  if not number(disconnected) or m.at < number(disconnected) + ${DISCONNECT_GRACE_MS} then
+    return fail('GAME_GRACE_ACTIVE')
+  end
+  local other = m.actorId == ARGV[3] and 'black_disconnected_at' or 'white_disconnected_at'
+  local result = m.actorId == ARGV[3] and 'black_win' or 'white_win'
+  if number(other) == number(disconnected) then result = 'draw' end
+  outcome = { result = result, reason = 'abandonment' }
 elseif m.kind == 'move' then
   local mover = turn == 'w' and ARGV[3] or ARGV[4]
   if m.actorId ~= mover or m.move.color ~= turn or m.move.turn == turn then return fail('GAME_FORBIDDEN') end
@@ -121,12 +142,16 @@ elseif m.kind == 'offer' and not outcome then
   redis.call('HSET', KEYS[1], 'draw_offered_by', m.actorId)
 elseif m.kind == 'decline' and not outcome then
   redis.call('HDEL', KEYS[1], 'draw_offered_by')
+elseif m.kind == 'disconnect' and not outcome then
+  redis.call('HSET', KEYS[1], disconnected, m.at)
+elseif m.kind == 'reconnect' and not outcome then
+  redis.call('HDEL', KEYS[1], disconnected)
 end
 if m.kind == 'move' or outcome then redis.call('HSET', KEYS[1], clock, remaining) end
 if outcome then
   redis.call('HSET', KEYS[1], 'status', 'completed', 'result', outcome.result,
     'reason', outcome.reason, 'ended_at', at, 'last_move_at', at)
-  redis.call('HDEL', KEYS[1], 'draw_offered_by')
+  redis.call('HDEL', KEYS[1], 'draw_offered_by', 'white_disconnected_at', 'black_disconnected_at')
 end
 redis.call('HINCRBY', KEYS[1], 'version', 1)
 deadline(ARGV[1])

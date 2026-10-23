@@ -8,16 +8,21 @@ import { GameTasks } from "./game.tasks.ts";
 import { playerKey } from "./matchmaking.types.ts";
 import { TimerManager } from "./TimerManager.ts";
 import { reconcileActiveGame } from "./game.recovery.ts";
+import { ReconnectionManager } from "./ReconnectionManager.ts";
 
 export class GameManager {
   private readonly tasks = new GameTasks();
   private readonly snapshots = new Map<string, GameState>();
   private readonly timer: TimerManager;
+  private readonly reconnections: ReconnectionManager;
+  private readonly presenceTasks = new Set<Promise<void>>();
+  private readonly presenceRetries = new Map<string, object>();
   private running = false;
   private reconcileAt = 0;
   private reconcileCursor: string | undefined;
 
   constructor(private readonly hooks: GameHooks) {
+    this.reconnections = new ReconnectionManager(hooks);
     this.timer = new TimerManager({
       run: (id, at) => this.expire(id, at),
       sync: (id, at) => this.sync(id, at),
@@ -26,7 +31,12 @@ export class GameManager {
   }
   start() { this.running = true; this.timer.start(); }
   pause() { this.running = false; this.timer.pause(); }
-  async stop() { this.pause(); await this.timer.stop(); await this.tasks.drain(); }
+  async stop() {
+    this.pause();
+    await this.timer.stop();
+    while (this.presenceTasks.size) await Promise.allSettled([...this.presenceTasks]);
+    await this.tasks.drain();
+  }
   startGame(id: string) {
     return this.tasks.run(id, async () => {
       if (!this.running) return;
@@ -44,6 +54,7 @@ export class GameManager {
         }
         throw error;
       }
+      state = await this.reconnections.settle(state, serverNow());
       if (state.status === "completed") { this.announceEnd(state); return; }
       if (state.moveCount) { this.broadcast(state, gameResync(state)); return; }
       this.broadcast(state, { type: "game:start", payload: {
@@ -60,9 +71,12 @@ export class GameManager {
       if (command.type === "game:reconnect") {
         await this.resync(userId, ownerId, command.payload.gameId); return;
       }
-      const state = await this.requireGame(command.payload.gameId, userId);
+      let state = await this.requireGame(command.payload.gameId, userId);
       if (!this.hooks.isCurrent(userId, ownerId)) return;
       if (state.status !== "active") throw new GameError("GAME_NOT_ACTIVE", "This game is not active");
+      state = await this.settleConnections(state, at);
+      if (!this.hooks.isCurrent(userId, ownerId)) return;
+      if (state.status !== "active") return;
       const movingId = state.turn === "w" ? state.whiteId : state.blackId;
       const clocks = gameClocks(state, at);
       if ((state.turn === "w" ? clocks.whiteTime : clocks.blackTime) <= 0) {
@@ -84,9 +98,10 @@ export class GameManager {
     return state;
   }
   private async resync(userId: string, ownerId: string, id: string) {
-    const state = await readGame(id);
+    let state = await readGame(id);
     if (state) {
       if (state.whiteId !== userId && state.blackId !== userId) throw new GameError("GAME_FORBIDDEN", "You are not a player in this game");
+      if (this.hooks.isCurrent(userId, ownerId)) state = await this.settleConnections(state, serverNow());
       if (this.hooks.isCurrent(userId, ownerId)) this.hooks.send(userId, gameResync(state), ownerId);
       return;
     }
@@ -143,6 +158,8 @@ export class GameManager {
   }
   private announceEnd(state: GameState) {
     this.snapshots.delete(state.id);
+    this.reconnections.forget(state.whiteId);
+    this.reconnections.forget(state.blackId);
     this.broadcast(state, { type: "game:over", payload: {
       gameId: state.id, ...state.outcome, pgn: gamePgn(state),
       fen: state.fen, moveCount: state.moveCount, ...gameClocks(state),
@@ -152,23 +169,83 @@ export class GameManager {
     const updated = await mutateGame(state, { kind: "timeout", at, timeoutResult: timeoutResult(state) });
     if (updated.status === "completed") this.announceEnd(updated);
   }
+  private async settleConnections(state: GameState, at: number): Promise<GameState> {
+    const updated = await this.reconnections.settle(state, at);
+    if (state.status === "active" && updated.status === "completed") this.announceEnd(updated);
+    return updated;
+  }
   private expire(id: string, at: number) {
     return this.tasks.run(id, async () => {
       const state = await readGame(id);
-      if (state?.status === "active") await this.timeout(state, at);
+      if (state?.status === "active") {
+        const updated = await this.settleConnections(state, at);
+        if (updated.status === "active") await this.timeout(updated, at);
+      }
       else await redisOperation(() => redis.zrem(gameIndexes.deadlines, id));
     });
   }
   private sync(id: string, at: number) {
     return this.tasks.run(id, async () => {
-      const state = await readGame(id);
+      let state = await readGame(id);
       if (state?.status !== "active") return;
+      state = await this.settleConnections(state, at);
+      if (state.status !== "active") return;
       this.broadcast(state, { type: "game:time", payload: {
         gameId: id, moveCount: state.moveCount, turn: state.turn, ...gameClocks(state, at),
       } });
     });
   }
-  async resume(userId: string, ownerId: string) {
+  resume(userId: string, ownerId: string): Promise<void> {
+    return this.trackPresence(this.resumeConnection(userId, ownerId));
+  }
+  private trackPresence(task: Promise<void>): Promise<void> {
+    this.presenceTasks.add(task);
+    void task.then(() => this.presenceTasks.delete(task), () => this.presenceTasks.delete(task));
+    return task;
+  }
+  private async resumeConnection(userId: string, ownerId: string) {
+    if (!this.hooks.isCurrent(userId, ownerId)) return;
+    this.reconnections.connected(userId);
+    const intent = {};
+    this.presenceRetries.set(userId, intent);
+    const id = await this.playerGameId(userId);
+    if (!id) { this.clearPresence(userId, intent, true); return; }
+    await this.tasks.run(id, async () => {
+      let state = await this.requireGame(id, userId);
+      if (!this.hooks.isCurrent(userId, ownerId)) return;
+      state = await this.settleConnections(state, serverNow());
+      if (state.status !== "active") this.clearPresence(userId, intent, true);
+      if (state.status !== "waiting") this.hooks.send(userId, gameResync(state), ownerId);
+    });
+    this.clearPresence(userId, intent);
+  }
+  disconnected(userId: string, at: number): Promise<void> {
+    return this.trackPresence(this.disconnectConnection(userId, at));
+  }
+  private async disconnectConnection(userId: string, at: number): Promise<void> {
+    if (this.hooks.connectedAt(userId) !== undefined) return;
+    this.reconnections.disconnected(userId, at);
+    const intent = {};
+    this.presenceRetries.set(userId, intent);
+    await this.repairPresence(userId, intent);
+  }
+  private clearPresence(userId: string, intent: object, forget = false): void {
+    if (this.presenceRetries.get(userId) !== intent) return;
+    this.presenceRetries.delete(userId);
+    if (forget) this.reconnections.forget(userId);
+  }
+  private async repairPresence(userId: string, intent: object): Promise<void> {
+    const id = await this.playerGameId(userId);
+    if (!id) { this.clearPresence(userId, intent, true); return; }
+    await this.tasks.run(id, async () => {
+      const state = await readGame(id);
+      if (state?.status === "active" && [state.whiteId, state.blackId].includes(userId)) {
+        await this.settleConnections(state, serverNow());
+      } else this.clearPresence(userId, intent, true);
+    });
+    this.clearPresence(userId, intent);
+  }
+  private async playerGameId(userId: string): Promise<string | null> {
     let id = await redisOperation(() => redis.get(playerKey(userId)));
     if (!id) {
       const game = await prisma.game.findFirst({ where: {
@@ -176,16 +253,20 @@ export class GameManager {
       }, select: { id: true } });
       id = game?.id ?? null;
     }
-    if (!id) return;
-    await this.tasks.run(id, async () => {
-      const state = await this.requireGame(id!, userId);
-      if (state.status !== "waiting" && this.hooks.isCurrent(userId, ownerId)) {
-        this.hooks.send(userId, gameResync(state), ownerId);
-      }
-    });
+    return id;
   }
   private async maintain() {
     if (!this.running) return;
+    for (const [userId, intent] of [...this.presenceRetries].slice(0, 8)) {
+      try { await this.repairPresence(userId, intent); }
+      catch (error) {
+        console.error("Game presence repair deferred:", error);
+        if (this.presenceRetries.get(userId) === intent) {
+          this.presenceRetries.delete(userId);
+          this.presenceRetries.set(userId, intent);
+        }
+      }
+    }
     const starts = await redisOperation(() => redis.zrangebyscore(gameIndexes.starting, "-inf", serverNow(), "LIMIT", 0, 8));
     for (const id of starts) {
       try { await this.startGame(id); }
@@ -240,6 +321,8 @@ export class GameManager {
         const record = await prisma.game.findUnique({ where: { id: game.id }, select: { status: true } });
         if (record?.status === "aborted") {
           this.snapshots.delete(game.id);
+          this.reconnections.forget(game.whitePlayerId);
+          this.reconnections.forget(game.blackPlayerId);
           const message = { type: "game:over", payload: {
             gameId: game.id, status: "aborted", result: null, reason: "server_crash", pgn: null,
           } };

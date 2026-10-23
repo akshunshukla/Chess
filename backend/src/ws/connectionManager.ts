@@ -5,17 +5,25 @@ import { measuredLag } from "./latency.ts";
 const connections = new Map<string, WebSocket>();
 const connectionIds = new WeakMap<WebSocket, string>();
 const identities = new WeakMap<WebSocket, AccessTokenClaims>();
+const authenticatedAt = new WeakMap<WebSocket, number>();
 export const connectionLag = (userId: string) => measuredLag(connections.get(userId));
+export function connectionAuthenticatedAt(userId: string): number | undefined {
+  const socket = connections.get(userId);
+  return socket?.readyState === WebSocket.OPEN ? authenticatedAt.get(socket) : undefined;
+}
 
 export function registerConnection(
   userId: string,
   socket: WebSocket,
   connectionId: string,
   claims: AccessTokenClaims,
+  at: number,
 ) {
   const previous = connections.get(userId);
   connectionIds.set(socket, connectionId);
   identities.set(socket, claims);
+  authenticatedAt.set(socket, previous?.readyState === WebSocket.OPEN
+    ? authenticatedAt.get(previous) ?? at : at);
   connections.set(userId, socket);
 
   socket.once("close", () => {
