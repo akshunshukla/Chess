@@ -4,12 +4,14 @@ import { prisma } from "./db/prisma.ts";
 import { redis } from "./db/redis.ts";
 import { attachWebSocketServer } from "./ws/index.ts";
 import { recoverGames, recoverMatchmaking } from "./game/index.ts";
+import { analysisQueue } from "./analysis/index.ts";
 
 const startServer = async () => {
   await prisma.$connect();
   await redis.ping();
   await recoverGames();
   await recoverMatchmaking();
+  await analysisQueue.start();
   const server = app.listen(env.PORT, () => {
     console.log(`♟️  Chess server running on port ${env.PORT}`);
   });
@@ -24,6 +26,8 @@ const startServer = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
     pauseMatchmaking();
+    analysisQueue.pause();
+    const analysisStopped = analysisQueue.stop();
     const timeout = setTimeout(() => {
       console.error("Shutdown exceeded 10 secs");
       process.exit(1);
@@ -38,7 +42,7 @@ const startServer = async () => {
     });
     for (const socket of wss.clients)
       socket.close(1001, "Server shutting down");
-    Promise.all([httpClosed, wsClosed])
+    Promise.all([httpClosed, wsClosed, analysisStopped])
       .then(() => stopMatchmaking())
       .then(() => Promise.all([prisma.$disconnect(), redis.quit()]))
       .then(() => {

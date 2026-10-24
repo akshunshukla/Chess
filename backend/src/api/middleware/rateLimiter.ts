@@ -13,7 +13,9 @@ export function rateLimiter(
   endpoint: string,
   limit: number,
   identity: "ip" | "user" = "ip",
+  windowSeconds = 60,
 ): RequestHandler {
+  if (!Number.isSafeInteger(windowSeconds) || windowSeconds < 1) throw new RangeError("Invalid rate window");
   return async (req, res, next) => {
     const value = identity === "user" ? res.locals.userId : req.ip;
     if (typeof value !== "string" || !value) {
@@ -21,15 +23,15 @@ export function rateLimiter(
       return;
     }
     const now = Math.floor(Date.now() / 1000);
-    const windowKey = Math.floor(now / 60);
+    const windowKey = Math.floor(now / windowSeconds);
     const identityHash = createHash("sha256").update(`${identity}:${value}`).digest("hex");
     try {
       const count = await redisOperation(() => redis.eval(
-        incrementScript, 1, `rate:${identityHash}:${endpoint}:${windowKey}`, 60,
+        incrementScript, 1, `rate:${identityHash}:${endpoint}:${windowSeconds}:${windowKey}`, windowSeconds,
       ));
       if (typeof count !== "number") throw new HttpError(503, "Authentication service unavailable");
       if (count > limit) {
-        res.set("Retry-After", String(60 - now % 60));
+        res.set("Retry-After", String(windowSeconds - now % windowSeconds));
         next(new HttpError(429, "Too many requests"));
         return;
       }

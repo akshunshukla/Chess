@@ -20,6 +20,8 @@ export function gameResync(state: GameState, at = serverNow()) {
     type: "game:resync",
     payload: {
       gameId: state.id,
+      whiteId: state.whiteId,
+      blackId: state.blackId,
       fen: state.fen,
       turn: state.turn,
       status: state.status,
