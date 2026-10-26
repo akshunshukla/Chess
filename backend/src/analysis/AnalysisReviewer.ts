@@ -1,7 +1,7 @@
 import { Chess } from "chess.js";
 import type { Prisma } from "../generated/prisma/client.ts";
 import type { AnalysisSource, ReviewedInputMove } from "./analysis.input.ts";
-import type { EngineEvaluation } from "./StockfishPool.ts";
+import type { EngineEvaluation } from "./StockfishEngine.ts";
 import { isBookMove } from "./OpeningBook.ts";
 import { classifyMove, expectedScoreLoss, playerAccuracy } from "./MoveCategorizer.ts";
 import { applyUci, createPositionEvaluator, type PositionEvaluator, type ReviewEngine } from "./ReviewPosition.ts";

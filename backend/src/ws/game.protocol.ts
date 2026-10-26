@@ -8,7 +8,7 @@ export const gameMessageSchemas = [
     payload: z.strictObject({
       gameId, from: square, to: square,
       promotion: z.enum(["q", "r", "b", "n"]).optional(),
-      expectedPly: z.number().int().min(0).max(10000),
+      expectedPly: z.number().int().min(0).max(10000).optional(),
     }),
   }),
   z.strictObject({ type: z.literal("game:resign"), payload: z.strictObject({ gameId }) }),

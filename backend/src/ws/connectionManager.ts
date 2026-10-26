@@ -26,11 +26,14 @@ export function registerConnection(
     ? authenticatedAt.get(previous) ?? at : at);
   connections.set(userId, socket);
 
-  socket.once("close", () => {
-    if (connections.get(userId) === socket) connections.delete(userId);
-  });
-  if (previous && previous !== socket)
-    previous.close(1008, "Connected elsewhere");
+  if (previous && previous !== socket && previous.readyState === WebSocket.OPEN)
+    previous.close(4001, "replaced_by_new_connection");
+}
+
+export function unregisterConnection(userId: string, socket: WebSocket): boolean {
+  if (connections.get(userId) !== socket) return false;
+  connections.delete(userId);
+  return true;
 }
 export function sendToUser(
   userId: string,

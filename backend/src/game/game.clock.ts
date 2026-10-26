@@ -8,7 +8,7 @@ export function gameClocks(state: GameState, at = serverNow()) {
   let whiteTime = state.whiteTimeMs;
   let blackTime = state.blackTimeMs;
   if (state.status === "active") {
-    const elapsed = Math.max(0, at - state.lastMoveAt - state.lagAllowanceMs);
+    const elapsed = Math.max(0, at - state.lastMoveAt);
     if (state.turn === "w") whiteTime = Math.max(0, whiteTime - elapsed);
     else blackTime = Math.max(0, blackTime - elapsed);
   }

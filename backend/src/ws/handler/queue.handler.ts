@@ -1,8 +1,9 @@
-import { joinQueue, leaveQueue } from "../../game/index.ts";
+import type { MatchmakingService } from "../../game/index.ts";
 
 type QueueCommand = "queue:join" | "queue:leave";
 
 export async function handleQueueCommand(
+  service: MatchmakingService,
   userId: string,
   connectionId: string,
   command: QueueCommand,
@@ -10,8 +11,8 @@ export async function handleQueueCommand(
 ) {
   const status =
     command === "queue:join"
-      ? await joinQueue(userId, connectionId, isCurrent)
-      : await leaveQueue(userId, connectionId);
+      ? await service.joinQueue(userId, connectionId, isCurrent)
+      : await service.leaveQueue(userId, connectionId);
   return {
     type: "queue:status",
     payload: { command, status },

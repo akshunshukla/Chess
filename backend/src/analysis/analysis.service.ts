@@ -1,6 +1,6 @@
 import { prisma } from "../db/index.ts";
 import { HttpError } from "../utils/errors.ts";
-import { analysisQueue } from "./AnalysisQueue.ts";
+import { analysisWorker } from "./AnalysisWorker.ts";
 import { parseAnalysisInputAsync } from "./analysis.input.ts";
 import { emptySummary, lockAnalysis } from "./analysis.jobs.ts";
 import { stockfishConfig } from "./analysis.config.ts";
@@ -18,13 +18,10 @@ async function admission(tx: Prisma.TransactionClient, userId: string) {
   } });
   if (pending >= 3) throw new HttpError(409, "You already have three unfinished analyses");
 }
-function submitted<T>(analysis: T) {
-  analysisQueue.wake();
-  return { analysis };
-}
+function submitted<T>(analysis: T) { return { analysis }; }
 
 export async function requestGameAnalysis(userId: string, gameId: string) {
-  analysisQueue.assertAvailable();
+  analysisWorker.assertAvailable();
   const game = await prisma.game.findFirst({ where: { id: gameId, OR: [
       { whitePlayerId: userId }, { blackPlayerId: userId },
   ] }, select: { status: true, pgn: true } });
@@ -44,7 +41,7 @@ export async function requestGameAnalysis(userId: string, gameId: string) {
 }
 
 export async function requestImportedAnalysis(userId: string, input: { kind: "pgn" | "fen"; pgn?: string; fen?: string }) {
-  analysisQueue.assertAvailable();
+  analysisWorker.assertAvailable();
   const parsed = await parseAnalysisInputAsync(input);
   const analysis = await prisma.$transaction(async (tx) => {
     await admission(tx, userId);
@@ -61,7 +58,7 @@ export async function requestImportedAnalysis(userId: string, input: { kind: "pg
 }
 
 export async function retryAnalysis(userId: string, id: string) {
-  analysisQueue.assertAvailable();
+  analysisWorker.assertAvailable();
   const analysis = await prisma.$transaction(async (tx) => {
     await admission(tx, userId);
     await lockAnalysis(tx, id);
@@ -71,7 +68,7 @@ export async function retryAnalysis(userId: string, id: string) {
     await tx.moveAnalysis.deleteMany({ where: { gameAnalysisId: id } });
     await tx.positionAnalysis.deleteMany({ where: { gameAnalysisId: id } });
     return tx.gameAnalysis.update({ where: { id }, data: {
-      ...emptySummary(), status: "pending", attemptCount: 0, startedAt: null, completedAt: null,
+      ...emptySummary(), status: "pending", startedAt: null, completedAt: null,
       lastError: null, engineVersion: null, engineDepth: config.depth, classificationVersion: REVIEW_VERSION,
     }, select: summary });
   }, transactionOptions);

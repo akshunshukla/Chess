@@ -1,542 +1,268 @@
 import { randomInt, randomUUID } from "node:crypto";
 import { prisma, redis, redisOperation } from "../db/index.ts";
 import { HttpError } from "../utils/errors.ts";
+import { abortWaitingGame, matchedMessage, prepareWaitingGame } from "./GameService.ts";
 import {
-  abortWaitingGame,
-  GameUnavailableError,
-  getWaitingGame,
-  listWaitingGames,
-  matchedMessage,
-  prepareWaitingGame,
-  type WaitingGame,
-} from "./GameService.ts";
-import {
-  addQueuePlayer,
-  candidateIds,
-  finishReservation,
-  initializeGame,
-  markCancellation,
-  readQueuePlayer,
-  readReservation,
-  removeQueuePlayer,
-  removeWaitingGame,
-  reservePair,
+  addQueuePlayer, claimOpponent, discardWaitingGame, initializeGame, removeQueuePlayer,
 } from "./matchmaking.store.ts";
 import {
-  BATCH_SIZE,
-  gameKey,
-  playerKey,
-  queueKeys,
-  ratingWindow,
-  reservedKey,
-  type MatchmakingHooks,
-  type QueuePlayer,
-  type Reservation,
+  MATCHMAKING, TIME_CONTROL_SECONDS, playerKey, queueKey, ratingWindow,
+  type MatchmakingHooks, type MatchPair, type QueuePlayer,
 } from "./matchmaking.types.ts";
 
-export async function joinQueue(
-  userId: string,
-  ownerId: string,
-  isCurrent: () => boolean = () => true,
-  joinedAt = Date.now(),
-): Promise<"joined" | "already_queued" | "busy" | "stale"> {
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    select: { rating: true },
-  });
-  if (!user) throw new HttpError(401, "Account unavailable");
-  const busy = await prisma.game.findFirst({
-    where: {
-      status: { in: ["waiting", "active"] },
-      OR: [{ whitePlayerId: userId }, { blackPlayerId: userId }],
-    },
-    select: { id: true },
-  });
-  // Recheck after database awaits, immediately before submitting the Redis write.
-  if (!isCurrent()) return "stale";
-  if (busy) return "busy";
-  const result = await addQueuePlayer({
-    userId,
-    ownerId,
-    rating: user.rating,
-    joinedAt,
-  });
-  if (result === 1) return "joined";
-  if (result === 0) return "already_queued";
-  if (result === -1) return "busy";
-  throw new HttpError(503, "Unexpected matchmaking result");
-}
-
-export async function leaveQueue(
-  userId: string,
-  ownerId: string,
-): Promise<"left" | "not_queued" | "busy"> {
-  const result = await removeQueuePlayer(userId, ownerId);
-  if (result === 1) return "left";
-  if (result === 0) return "not_queued";
-  if (result === -1) return "busy";
-  throw new HttpError(503, "Unexpected matchmaking result");
-}
-
-export const findCandidates = candidateIds;
-
-interface QueueIntent {
-  ownerId: string;
-  wanted: boolean;
-}
+interface QueueIntent { ownerId: string; wanted: boolean }
+type JoinStatus = "joined" | "already_queued" | "busy" | "stale";
+type LeaveStatus = "left" | "not_queued" | "busy";
 
 export class MatchmakingService {
   private active = false;
-  private interval: ReturnType<typeof setInterval> | undefined;
+  private interval?: ReturnType<typeof setInterval>;
   private tail: Promise<void> = Promise.resolve();
   private passQueued = false;
-  private anchorOffset = 0;
-  private readonly candidatePages = new Map<string, number>();
+  private readonly waiting = new Map<string, QueuePlayer>();
   private readonly intents = new Map<string, QueueIntent>();
-  private intentCursor: MapIterator<[string, QueueIntent]> | undefined;
-  private waitingCursor: string | undefined;
-  private nextReconcile = 0;
 
   constructor(private readonly hooks: MatchmakingHooks) {}
 
-  start() {
+  start(): void {
     if (this.active) return;
     this.active = true;
-    this.interval = setInterval(() => this.kick(), 500);
+    this.interval = setInterval(() => this.kick(), MATCHMAKING.tickMs);
     this.interval.unref();
-    this.kick();
   }
 
-  pause() {
+  pause(): void {
     this.active = false;
     clearInterval(this.interval);
+    this.interval = undefined;
   }
 
-  async stop() {
+  async stop(): Promise<void> {
     this.pause();
-    let last: Promise<void>;
-    do {
-      last = this.tail;
-      await last;
-    } while (last !== this.tail);
+    let previous: Promise<void>;
+    do { previous = this.tail; await previous; } while (previous !== this.tail);
+    for (const userId of this.waiting.keys()) await removeQueuePlayer(userId);
+    this.waiting.clear();
+    this.intents.clear();
   }
 
-  requested(
-    userId: string,
-    ownerId: string,
-    command: "queue:join" | "queue:leave",
-  ) {
-    if (command === "queue:join")
-      this.intents.set(userId, { ownerId, wanted: true });
-    else if (
-      this.intents.get(userId)?.ownerId === ownerId ||
-      this.hooks.isCurrent(userId, ownerId)
-    ) {
-      this.intents.set(userId, { ownerId, wanted: false });
-      this.candidatePages.delete(userId);
+  private enqueue<T>(task: () => Promise<T>): Promise<T> {
+    const result = this.tail.then(task);
+    this.tail = result.then(() => {}, () => {});
+    return result;
+  }
+
+  requested(userId: string, ownerId: string, command: "queue:join" | "queue:leave"): void {
+    if (command === "queue:join" || this.intents.get(userId)?.ownerId === ownerId || this.hooks.isCurrent(userId, ownerId)) {
+      this.intents.set(userId, { ownerId, wanted: command === "queue:join" });
     }
   }
 
-  kick() {
+  isWaiting(userId: string, ownerId: string): boolean {
+    const player = this.waiting.get(userId);
+    return player?.ownerId === ownerId && this.wantsMatch(player);
+  }
+
+  joinQueue(userId: string, ownerId: string, isCurrent = () => true): Promise<JoinStatus> {
+    const intent = this.intents.get(userId) ?? { ownerId, wanted: true };
+    if (!this.intents.has(userId)) this.intents.set(userId, intent);
+    return this.enqueue(async () => {
+      const current = () => this.active && isCurrent() && this.hooks.isCurrent(userId, ownerId) &&
+        this.intents.get(userId) === intent && intent.wanted;
+      if (!current()) return "stale";
+      const user = await prisma.user.findUnique({ where: { id: userId }, select: { rating: true } });
+      if (!user) throw new HttpError(401, "Account unavailable");
+      const busy = await prisma.game.findFirst({ where: {
+        status: { in: ["waiting", "active"] },
+        OR: [{ whitePlayerId: userId }, { blackPlayerId: userId }],
+      }, select: { id: true } });
+      if (!current()) return "stale";
+      if (busy) {
+        await removeQueuePlayer(userId);
+        this.waiting.delete(userId);
+        this.clearIntent(userId, ownerId, intent);
+        return "busy";
+      }
+      const existing = this.waiting.get(userId);
+      const player: QueuePlayer = {
+        userId, ownerId, rating: user.rating,
+        joinedAt: existing?.joinedAt ?? Date.now(), timeControl: TIME_CONTROL_SECONDS,
+      };
+      const result = await addQueuePlayer(player);
+      if (result === -1) {
+        await removeQueuePlayer(userId);
+        this.waiting.delete(userId);
+        this.clearIntent(userId, ownerId, intent);
+        return "busy";
+      }
+      this.waiting.set(userId, player);
+      if (!current()) return "stale";
+      await this.tryPair(player, MATCHMAKING.windows[0].rating);
+      return result === 1 ? "joined" : "already_queued";
+    });
+  }
+
+  leaveQueue(userId: string, ownerId: string): Promise<LeaveStatus> {
+    return this.enqueue(async () => {
+      const player = this.waiting.get(userId);
+      const currentOwner = this.hooks.currentOwner(userId);
+      if (currentOwner && currentOwner !== ownerId) return "not_queued";
+      if (player && player.ownerId !== ownerId && currentOwner !== ownerId) return "not_queued";
+      const intent = this.intents.get(userId);
+      const removed = await removeQueuePlayer(userId);
+      this.waiting.delete(userId);
+      this.clearIntent(userId, ownerId, intent);
+      if (removed || player) return "left";
+      return await redisOperation(() => redis.exists(playerKey(userId))) ? "busy" : "not_queued";
+    });
+  }
+
+  kick(): void {
     if (!this.active || this.passQueued) return;
     this.passQueued = true;
     void this.enqueue(async () => {
       this.passQueued = false;
       if (this.active) await this.runPass();
-    }).catch((error) => console.error("Matchmaking worker failed:", error));
+    }).catch((error) => console.error("Matchmaking failed:", error));
   }
 
-  private enqueue(task: () => Promise<void>): Promise<void> {
-    const result = this.tail.then(task);
-    this.tail = result.catch(() => {});
-    return result;
+  private clearIntent(userId: string, ownerId: string, expected = this.intents.get(userId)): void {
+    if (expected?.ownerId === ownerId && this.intents.get(userId) === expected) this.intents.delete(userId);
   }
 
-  private wantsMatch(player: QueuePlayer) {
+  private wantsMatch(player: QueuePlayer): boolean {
     const intent = this.intents.get(player.userId);
-    return (
-      this.active &&
-      intent !== undefined &&
-      intent.wanted &&
-      intent.ownerId === player.ownerId &&
-      this.hooks.isCurrent(player.userId, player.ownerId)
-    );
+    return this.active && intent?.ownerId === player.ownerId && intent.wanted &&
+      this.hooks.isCurrent(player.userId, player.ownerId);
   }
 
-  private async eligible(player: QueuePlayer) {
-    return (
-      this.wantsMatch(player) &&
-      (await this.hooks.validate(player.userId, player.ownerId)) &&
-      this.wantsMatch(player)
-    );
+  private async eligible(player: QueuePlayer): Promise<boolean> {
+    return this.wantsMatch(player) && await this.hooks.validate(player.userId, player.ownerId) && this.wantsMatch(player);
   }
 
-  private async runPass() {
-    if (Date.now() >= this.nextReconcile) {
-      this.nextReconcile = Date.now() + 5000;
-      await this.reconcileWaiting();
-      await this.restoreQueueIntents();
-    }
-    const pending = await redisOperation(() =>
-      redis.zrangebyscore(queueKeys.pending, "-inf", Date.now(), "LIMIT", 0, 8),
-    );
-    for (const id of pending) {
+  private async pairEligible(first: QueuePlayer, second: QueuePlayer): Promise<boolean> {
+    const ready = await Promise.all([this.eligible(first), this.eligible(second)]);
+    return ready.every(Boolean) && this.wantsMatch(first) && this.wantsMatch(second);
+  }
+
+  private forget(player: QueuePlayer, intent = this.intents.get(player.userId)): void {
+    if (this.waiting.get(player.userId) === player) this.waiting.delete(player.userId);
+    this.clearIntent(player.userId, player.ownerId, intent);
+  }
+
+  private error(userId: string): void {
+    this.hooks.send(userId, { type: "error", payload: {
+      code: "MATCHMAKING_UNAVAILABLE", message: "Unable to start the game. Join the queue again.",
+    } });
+  }
+
+  private async runPass(): Promise<void> {
+    for (const player of [...this.waiting.values()]) {
       if (!this.active) return;
-      await this.processPending(id);
+      await this.tryPair(player, ratingWindow(player.joinedAt));
     }
-    const count = await redisOperation(() => redis.zcard(queueKeys.waiting));
-    if (!count) {
-      this.anchorOffset = 0;
+  }
+
+  private async tryPair(player: QueuePlayer, window: number): Promise<void> {
+    if (this.waiting.get(player.userId) !== player) return;
+    const owner = this.hooks.currentOwner(player.userId);
+    // A newly authenticated socket will transfer the entry in resume().
+    if (owner && owner !== player.ownerId) return;
+    const intent = this.intents.get(player.userId);
+    if (!await this.eligible(player)) {
+      const currentOwner = this.hooks.currentOwner(player.userId);
+      if (currentOwner && currentOwner !== player.ownerId) return;
+      await removeQueuePlayer(player.userId);
+      this.forget(player, intent);
       return;
     }
-    this.anchorOffset %= count;
-    const anchors = await redisOperation(() =>
-      redis.zrange(
-        queueKeys.waiting,
-        this.anchorOffset,
-        String(this.anchorOffset + BATCH_SIZE - 1),
-      ),
-    );
-    const deadline = Date.now() + 200;
-    let processed = 0;
-    let matches = 0;
-    for (const userId of anchors) {
-      if (!this.active || Date.now() > deadline || matches >= 8) break;
-      processed++;
-      const player = await readQueuePlayer(userId);
-      if (!player) {
-        this.candidatePages.delete(userId);
-        const owner = await redisOperation(() =>
-          redis.hget(queueKeys.owners, userId),
-        );
-        await removeQueuePlayer(userId, owner ?? "");
-        continue;
-      }
-      if (!(await this.eligible(player))) {
-        this.candidatePages.delete(userId);
-        await removeQueuePlayer(userId, player.ownerId);
-        continue;
-      }
-      const page = this.candidatePages.get(userId) ?? 0;
-      this.candidatePages.set(userId, (page + 1) % 1_000_000);
-      const ids = await candidateIds(userId, page);
-      const candidates = (await Promise.all(ids.map(readQueuePlayer)))
-        .filter((candidate): candidate is QueuePlayer => candidate !== null)
-        .sort(
-          (a, b) =>
-            a.joinedAt - b.joinedAt ||
-            Math.abs(a.rating - player.rating) -
-              Math.abs(b.rating - player.rating),
-        );
-      for (const candidate of candidates) {
-        const now = Date.now();
-        if (
-          Math.abs(player.rating - candidate.rating) >
-          Math.min(
-            ratingWindow(player.joinedAt, now),
-            ratingWindow(candidate.joinedAt, now),
-          )
-        )
-          continue;
-        if (!(await this.eligible(candidate)) || !this.wantsMatch(player))
-          continue;
-        const [white, black] =
-          randomInt(2) === 0 ? [player, candidate] : [candidate, player];
-        const reservation = { id: randomUUID(), white, black, createdAt: now };
-        if (await reservePair(reservation)) {
-          this.candidatePages.delete(player.userId);
-          this.candidatePages.delete(candidate.userId);
-          await this.processPending(reservation.id);
-          matches++;
-          break;
-        }
-      }
+    const opponentId = await claimOpponent(player.userId, window);
+    if (!opponentId) {
+      const queued = await redisOperation(() => redis.zscore(queueKey, player.userId));
+      if (queued === null) { this.forget(player, intent); this.error(player.userId); }
+      return;
     }
-    this.anchorOffset += processed;
+    const opponent = this.waiting.get(opponentId);
+    this.waiting.delete(player.userId);
+    this.waiting.delete(opponentId);
+    if (!opponent) {
+      this.forget(player, intent);
+      this.error(player.userId);
+      this.error(opponentId);
+      console.warn("Paired opponent is no longer waiting:", opponentId);
+      return;
+    }
+    await this.createMatch(player, opponent);
   }
 
-  private async processPending(id: string) {
+  private async createMatch(first: QueuePlayer, second: QueuePlayer): Promise<void> {
+    const [white, black] = randomInt(2) === 0 ? [first, second] : [second, first];
+    const pair: MatchPair = { id: randomUUID(), white, black, createdAt: Date.now() };
+    const firstIntent = this.intents.get(first.userId);
+    const secondIntent = this.intents.get(second.userId);
     try {
-      const reservation = await readReservation(id);
-      if (!reservation) {
-        await redisOperation(() => redis.zrem(queueKeys.pending, id));
-        return;
+      if (!await this.pairEligible(first, second)) throw new Error("Player left the queue");
+      const game = await prepareWaitingGame(pair);
+      await initializeGame(pair);
+      if (!await this.pairEligible(first, second) || !this.wantsMatch(first) || !this.wantsMatch(second)) {
+        throw new Error("Player disconnected before the game started");
       }
-      if (reservation.cancelReason) {
-        await this.cancel(reservation, reservation.cancelReason);
-        return;
-      }
-      if (
-        Date.now() - reservation.createdAt > 30000 ||
-        !(await this.eligible(reservation.white)) ||
-        !(await this.eligible(reservation.black))
-      ) {
-        await this.cancel(reservation, "abandonment");
-        return;
-      }
-      const game = await prepareWaitingGame(reservation);
-      if (game.status !== "waiting") {
-        if (game.status === "aborted")
-          await this.cancel(reservation, "abandonment");
-        else {
-          if (game.status === "active") await this.hooks.activate(game.id);
-          this.matched(reservation);
-          await finishReservation(reservation);
-        }
-        return;
-      }
-      if (!(await initializeGame(reservation)))
-        throw new Error("Could not initialize reserved game");
-      if (
-        !(await this.eligible(reservation.white)) ||
-        !(await this.eligible(reservation.black))
-      ) {
-        await this.cancel(reservation, "abandonment");
-        return;
-      }
-      const sentWhite = this.hooks.send(
-        game.whitePlayerId,
-        matchedMessage(game, game.whitePlayerId),
-        reservation.white.ownerId,
-      );
-      const sentBlack = this.hooks.send(
-        game.blackPlayerId,
-        matchedMessage(game, game.blackPlayerId),
-        reservation.black.ownerId,
-      );
-      if (!sentWhite || !sentBlack) {
-        await this.cancel(reservation, "abandonment");
-        return;
-      }
-      // Notification is at least once: an uncertain finalization retries the
-      // same match ID instead of creating a second game.
-      await this.hooks.activate(game.id);
-      this.matched(reservation);
-      await finishReservation(reservation);
+      const sentWhite = this.hooks.send(white.userId, matchedMessage(game, white.userId), white.ownerId);
+      const sentBlack = this.hooks.send(black.userId, matchedMessage(game, black.userId), black.ownerId);
+      if (!sentWhite || !sentBlack) throw new Error("Player disconnected before the game started");
+      await this.hooks.activate(pair.id);
     } catch (error) {
-      if (error instanceof GameUnavailableError) {
-        const reservation = await readReservation(id);
-        if (reservation) {
-          await this.cancel(reservation, "abandonment");
-          return;
-        }
-      }
-      console.error(`Matchmaking reservation ${id} deferred:`, error);
-      await redisOperation(() =>
-        redis.zadd(queueKeys.pending, "XX", Date.now() + 2000, id),
-      );
-    }
-  }
-
-  private async cancel(
-    reservation: Reservation,
-    reason: "abandonment" | "server_crash",
-  ) {
-    await markCancellation(reservation, reason);
-    const aborted = await abortWaitingGame(reservation, reason);
-    if (aborted)
-      await removeWaitingGame(
-        reservation.id,
-        reservation.white.userId,
-        reservation.black.userId,
-      );
-    await finishReservation(reservation);
-    if (!aborted) { this.matched(reservation); return; }
-    for (const player of [reservation.white, reservation.black]) {
-      this.hooks.send(player.userId, {
-        type: "queue:cancelled",
-        payload: { gameId: reservation.id, reason },
-      });
+      console.error(`Could not create matched game ${pair.id}:`, error);
       try {
-        if (!(await this.eligible(player))) continue;
-        const status = await joinQueue(
-          player.userId,
-          player.ownerId,
-          () => this.wantsMatch(player),
-          player.joinedAt,
-        );
-        if (
-          this.hooks.isCurrent(player.userId, player.ownerId) &&
-          status !== "stale"
-        ) {
-          this.hooks.send(
-            player.userId,
-            {
-              type: "queue:status",
-              payload: { command: "queue:join", status },
-            },
-            player.ownerId,
-          );
-        }
-      } catch (error) {
-        console.error("Matchmaking requeue deferred:", error);
-        this.hooks.send(
-          player.userId,
-          {
-            type: "error",
-            payload: {
-              code: "MATCHMAKING_UNAVAILABLE",
-              message: "Rejoining the queue will be retried.",
-            },
-          },
-          player.ownerId,
-        );
+        await this.hooks.cancel?.(pair.id);
+      } catch (cleanupError) {
+        console.error(`Could not cancel matched game ${pair.id}:`, cleanupError);
       }
+      try {
+        await abortWaitingGame(pair.id);
+      } catch (cleanupError) {
+        console.error(`Could not abort waiting game ${pair.id}:`, cleanupError);
+      }
+      try {
+        await discardWaitingGame(pair);
+      } catch (cleanupError) {
+        console.error(`Could not discard waiting state ${pair.id}:`, cleanupError);
+      }
+      this.error(first.userId);
+      this.error(second.userId);
+    } finally {
+      this.clearIntent(first.userId, first.ownerId, firstIntent);
+      this.clearIntent(second.userId, second.ownerId, secondIntent);
     }
   }
 
-  private matched(reservation: Reservation) {
-    for (const player of [reservation.white, reservation.black]) {
-      if (this.intents.get(player.userId)?.ownerId === player.ownerId) this.intents.delete(player.userId);
-      this.candidatePages.delete(player.userId);
-    }
-  }
-
-  private async reconcileWaiting() {
-    const games = await listWaitingGames(this.waitingCursor);
-    this.waitingCursor = games.length ? games[games.length - 1]!.id : undefined;
-    for (const game of games) {
-      const reservation = await this.reservationForGame(game);
-      const state = await redisOperation(() => redis.hgetall(gameKey(game.id)));
-      const [whiteMapping, blackMapping] = await redisOperation(() =>
-        redis.mget(
-          playerKey(game.whitePlayerId),
-          playerKey(game.blackPlayerId),
-        ),
-      );
-      const connected =
-        reservation.white.ownerId &&
-        reservation.black.ownerId &&
-        (await this.hooks.validate(
-          game.whitePlayerId,
-          reservation.white.ownerId,
-        )) &&
-        (await this.hooks.validate(
-          game.blackPlayerId,
-          reservation.black.ownerId,
-        ));
-      if (
-        !connected ||
-        state.status !== "waiting" ||
-        state.white_id !== game.whitePlayerId ||
-        state.black_id !== game.blackPlayerId ||
-        whiteMapping !== game.id ||
-        blackMapping !== game.id
-      ) {
-        await this.cancel(
-          reservation,
-          connected ? "server_crash" : "abandonment",
-        );
-      }
-    }
-  }
-
-  private async restoreQueueIntents() {
-    this.intentCursor ??= this.intents.entries();
-    for (let i = 0; i < 8; i++) {
-      const next = this.intentCursor.next();
-      if (next.done) {
-        this.intentCursor = undefined;
-        break;
-      }
-      const [userId, intent] = next.value;
-      const { ownerId } = intent;
-      if (!intent.wanted || !this.hooks.isCurrent(userId, ownerId)) continue;
-      const [queued, reserved, playing] = await redisOperation(() =>
-        Promise.all([
-          redis.zscore(queueKeys.ratings, userId),
-          redis.get(reservedKey(userId)),
-          redis.get(playerKey(userId)),
-        ]),
-      );
-      if (queued !== null || reserved !== null || playing !== null) continue;
-      if (!(await this.hooks.validate(userId, ownerId))) continue;
-      const status = await joinQueue(
-        userId,
-        ownerId,
-        () =>
-          this.active &&
-          this.intents.get(userId) === intent &&
-          this.hooks.isCurrent(userId, ownerId),
-      );
-      if (status === "joined" || status === "already_queued") {
-        this.hooks.send(
-          userId,
-          { type: "queue:status", payload: { command: "queue:join", status } },
-          ownerId,
-        );
-      }
-    }
-  }
-
-  private async reservationForGame(game: WaitingGame): Promise<Reservation> {
-    const state = await redisOperation(() => redis.hgetall(gameKey(game.id)));
-    const joinedAt = (value: string | undefined) =>
-      value !== undefined && Number.isFinite(Number(value))
-        ? Number(value)
-        : game.createdAt.getTime();
-    return {
-      id: game.id,
-      createdAt: game.createdAt.getTime(),
-      white: {
-        userId: game.whitePlayerId,
-        ownerId: this.hooks.currentOwner(game.whitePlayerId) ?? "",
-        rating: game.whitePlayer.rating,
-        joinedAt: joinedAt(state.white_joined_at),
-      },
-      black: {
-        userId: game.blackPlayerId,
-        ownerId: this.hooks.currentOwner(game.blackPlayerId) ?? "",
-        rating: game.blackPlayer.rating,
-        joinedAt: joinedAt(state.black_joined_at),
-      },
-    };
-  }
-
-  disconnected(userId: string, ownerId: string) {
-    if (this.intents.get(userId)?.ownerId === ownerId)
-      this.intents.delete(userId);
+  disconnected(userId: string, ownerId: string): Promise<void> {
+    this.requested(userId, ownerId, "queue:leave");
     return this.enqueue(async () => {
-      if (this.hooks.currentOwner(userId)) return;
-      const game = await getWaitingGame(userId);
-      if (game && !this.hooks.currentOwner(userId))
-        await this.cancel(await this.reservationForGame(game), "abandonment");
+      const player = this.waiting.get(userId);
+      if (!player || player.ownerId !== ownerId || this.hooks.currentOwner(userId)) return;
+      await removeQueuePlayer(userId);
+      this.forget(player);
     });
   }
 
-  resume(userId: string, ownerId: string) {
-    const previousIntent = this.intents.get(userId);
+  resume(userId: string, ownerId: string): Promise<void> {
     return this.enqueue(async () => {
       if (!this.active || !this.hooks.isCurrent(userId, ownerId)) return;
-      const game = await getWaitingGame(userId);
-      if (!this.hooks.isCurrent(userId, ownerId)) return;
-      if (!game) {
-        const playing = await prisma.game.findFirst({ where: {
-          status: "active", OR: [{ whitePlayerId: userId }, { blackPlayerId: userId }],
-        }, select: { id: true } });
-        if (playing && this.hooks.isCurrent(userId, ownerId) && this.intents.get(userId) === previousIntent) {
-          this.intents.delete(userId);
-        }
+      const player = this.waiting.get(userId);
+      if (!player) return;
+      const intent = this.intents.get(userId);
+      if (intent && !intent.wanted) {
+        await removeQueuePlayer(userId);
+        this.forget(player, intent);
         return;
       }
-      const state = await redisOperation(() => redis.hgetall(gameKey(game.id)));
-      if (!this.hooks.isCurrent(userId, ownerId)) return;
-      if (
-        state.status === "waiting" &&
-        state.white_id === game.whitePlayerId &&
-        state.black_id === game.blackPlayerId
-      ) {
-        const currentIntent = this.intents.get(userId);
-        if (
-          currentIntent === previousIntent ||
-          currentIntent?.ownerId !== ownerId
-        ) {
-          this.intents.set(userId, { ownerId, wanted: true });
-        }
-        this.hooks.send(userId, matchedMessage(game, userId), ownerId);
-      } else {
-        await this.cancel(await this.reservationForGame(game), "server_crash");
-      }
+      this.waiting.set(userId, { ...player, ownerId });
+      if (intent?.ownerId !== ownerId) this.intents.set(userId, { ownerId, wanted: true });
+      this.hooks.send(userId, { type: "queue:status", payload: {
+        command: "queue:join", status: "already_queued",
+      } }, ownerId);
+      this.kick();
     });
   }
 }

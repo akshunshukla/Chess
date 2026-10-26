@@ -9,7 +9,6 @@ export function createSocketAuth(
 ) {
   let userId: string | undefined;
   let pending = false;
-  let failures = 0;
 
   const timer = setTimeout(
     () => socket.close(1008, "Authentication Timeout"),
@@ -34,7 +33,6 @@ export function createSocketAuth(
         socket.close(1011, "Authentication service unavailable");
         return;
       }
-      failures++;
       socket.send(
         JSON.stringify({
           type: "error",
@@ -44,7 +42,7 @@ export function createSocketAuth(
           },
         }),
       );
-      if (failures >= 3) socket.close(1008, "Too many authentication failures");
+      socket.close(1008, "Invalid authentication");
     } finally {
       pending = false;
     }

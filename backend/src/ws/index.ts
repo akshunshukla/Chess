@@ -4,6 +4,7 @@ import { clientMessageSchema } from "./protocol.ts";
 import { createSocketAuth } from "./authenticate.ts";
 import {
   registerConnection,
+  unregisterConnection,
   isCurrentConnection,
   isConnectionIdCurrent,
   currentConnectionId,
@@ -49,6 +50,7 @@ export function attachWebSocketServer(server: Server) {
     send: sendToUser,
     validate,
     activate: (id) => games.startGame(id),
+    cancel: (id) => games.cancelGame(id),
   });
   const wss = new WebSocketServer({
     server,
@@ -95,6 +97,7 @@ export function attachWebSocketServer(server: Server) {
           return;
         }
         if (isBinary) {
+          socket.send(JSON.stringify({ type: "error", payload: { code: "INVALID_MESSAGE", message: "Text messages only" } }));
           socket.close(1003, "Text messages only");
           return;
         }
@@ -142,16 +145,21 @@ export function attachWebSocketServer(server: Server) {
           await assertSessionActive(actor);
           if (!isCurrentConnection(actor.userId, socket)) return;
           const response = await handleQueueCommand(
+            matchmaking,
             actor.userId,
             connectionId,
             message.type,
             () => isCurrentConnection(actor.userId, socket),
           );
           if (!isCurrentConnection(actor.userId, socket)) {
-            await handleQueueCommand(actor.userId, connectionId, "queue:leave");
+            await handleQueueCommand(matchmaking, actor.userId, connectionId, "queue:leave");
             return;
           }
-          socket.send(JSON.stringify(response));
+          const queuedResponse = message.type === "queue:join" &&
+            (response.payload.status === "joined" || response.payload.status === "already_queued");
+          if (!queuedResponse || matchmaking.isWaiting(actor.userId, connectionId)) {
+            socket.send(JSON.stringify(response));
+          }
           matchmaking.kick();
           if (message.type === "queue:join" && response.payload.status === "busy") {
             await matchmaking.resume(actor.userId, connectionId);
@@ -175,6 +183,7 @@ export function attachWebSocketServer(server: Server) {
               payload: { code: "INVALID_JSON", message: "Malformed JSON" },
             }),
           );
+          if (!identity) socket.close(1008, "Invalid authentication message");
           return;
         }
         console.error("WebSocket message handler failed:", error);
@@ -188,14 +197,14 @@ export function attachWebSocketServer(server: Server) {
     socket.on("close", (code) => {
       console.log("WebSocket disconnected:", code);
       const actor = identity;
-      if (!actor) return;
+      if (!actor || !unregisterConnection(actor.userId, socket)) return;
       void games.disconnected(actor.userId, serverNow()).catch((error) => {
         console.error("Game disconnect handling deferred:", error);
       });
       // Clear intent immediately, even when another command is awaiting I/O.
       matchmaking.requested(actor.userId, connectionId, "queue:leave");
       void serializeQueueTask(actor.userId, async () => {
-        await handleQueueCommand(actor.userId, connectionId, "queue:leave");
+        await handleQueueCommand(matchmaking, actor.userId, connectionId, "queue:leave");
         await matchmaking.disconnected(actor.userId, connectionId);
         matchmaking.kick();
       }).catch((error) => {

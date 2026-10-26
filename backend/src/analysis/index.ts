@@ -7,4 +7,5 @@ export {
 } from "./MoveCategorizer.ts";
 export type { MoveReviewContext } from "./MoveCategorizer.ts";
 export { getAnalysis, requestGameAnalysis, requestImportedAnalysis, retryAnalysis } from "./analysis.service.ts";
-export { analysisQueue } from "./AnalysisQueue.ts";
+export { analysisWorker } from "./AnalysisWorker.ts";
+export { failInterruptedAnalyses } from "./analysis.jobs.ts";

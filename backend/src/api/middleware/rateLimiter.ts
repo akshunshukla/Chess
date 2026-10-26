@@ -10,7 +10,7 @@ const incrementScript = `
 `;
 
 export function rateLimiter(
-  endpoint: string,
+  scope: string,
   limit: number,
   identity: "ip" | "user" = "ip",
   windowSeconds = 60,
@@ -27,7 +27,7 @@ export function rateLimiter(
     const identityHash = createHash("sha256").update(`${identity}:${value}`).digest("hex");
     try {
       const count = await redisOperation(() => redis.eval(
-        incrementScript, 1, `rate:${identityHash}:${endpoint}:${windowSeconds}:${windowKey}`, windowSeconds,
+        incrementScript, 1, `rate:${scope}:${identityHash}:${windowKey}`, windowSeconds,
       ));
       if (typeof count !== "number") throw new HttpError(503, "Authentication service unavailable");
       if (count > limit) {

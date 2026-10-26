@@ -6,7 +6,6 @@ import {
   activateScript,
   cleanupScript,
   mutateScript,
-  scheduleScript,
 } from "./game.lua.ts";
 import {
   GameError,
@@ -17,9 +16,7 @@ import {
 } from "./game.types.ts";
 
 export const gameIndexes = {
-  deadlines: "games:deadlines",
   pending: "games:pending",
-  starting: "games:starting",
 } as const;
 export interface Mutation {
   kind: "move" | "finish" | "offer" | "decline" | "timeout" | "disconnect" | "reconnect" | "abandon";
@@ -28,7 +25,7 @@ export interface Mutation {
   move?: ValidatedMove;
   outcome?: GameOutcome;
   timeoutResult: GameResult;
-  nextLagMs?: number;
+  estimatedLagMs?: number;
 }
 const nonnegative = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const color = z.enum(["w", "b"]);
@@ -86,7 +83,7 @@ const mutationSchema = z
     actorId: z.string().min(1).optional(),
     at: nonnegative.positive(),
     timeoutResult: z.enum(["white_win", "black_win", "draw"]),
-    nextLagMs: nonnegative.max(200),
+    estimatedLagMs: nonnegative,
     outcome: outcomeSchema.optional(),
     move: moveSchema
       .omit({ timeRemainingMs: true, playedAt: true })
@@ -208,9 +205,7 @@ function keys(id: string, whiteId: string, blackId: string): string[] {
     gameKey(id),
     playerKey(whiteId),
     playerKey(blackId),
-    gameIndexes.deadlines,
     gameIndexes.pending,
-    gameIndexes.starting,
   ];
 }
 
@@ -281,12 +276,8 @@ export async function mutateGame(
     );
   }
   const commandKeys = keys(state.id, state.whiteId, state.blackId);
-  const nextLagMs = Math.floor(
-    Math.max(0, Math.min(200, mutation.nextLagMs ?? 0)),
-  );
-  if (!Number.isFinite(nextLagMs))
-    throw new GameError("GAME_INVALID_COMMAND", "Invalid lag allowance");
-  const checked = mutationSchema.safeParse({ ...mutation, nextLagMs });
+  const estimatedLagMs = Math.floor(Math.max(0, mutation.estimatedLagMs ?? 0));
+  const checked = mutationSchema.safeParse({ ...mutation, estimatedLagMs });
   if (!checked.success)
     throw new GameError("GAME_INVALID_COMMAND", "Invalid game mutation");
   const raw = await operation(() =>
@@ -299,9 +290,18 @@ export async function mutateGame(
       state.whiteId,
       state.blackId,
       JSON.stringify(checked.data),
+      state.moveCount,
     ),
   );
-  return decodeSnapshot(state.id, raw);
+  if (!Array.isArray(raw)) throw new GameError("GAME_INVALID_STATE", "Invalid mutation response");
+  if (raw[0] === "stale") {
+    console.warn(`Stale move rejected for game ${state.id} at move ${state.moveCount}`);
+    throw new GameError("STALE_MOVE", "Game state changed; resync before retrying");
+  }
+  if (!["ok", "timeout"].includes(raw[0]) || raw.length !== 4) {
+    throw new GameError("GAME_INVALID_STATE", "Invalid mutation result");
+  }
+  return decodeSnapshot(state.id, raw[3]);
 }
 
 export async function cleanupGame(
@@ -319,22 +319,6 @@ export async function cleanupGame(
     ),
   );
 }
-
-export async function scheduleGame(state: GameState): Promise<void> {
-  const commandKeys = keys(state.id, state.whiteId, state.blackId);
-  await operation(() =>
-    redis.eval(
-      scheduleScript,
-      commandKeys.length,
-      ...commandKeys,
-      state.id,
-      state.whiteId,
-      state.blackId,
-    ),
-  );
-}
-
-export const reindexGame = scheduleGame;
 
 export function pendingFinalizations(limit = 32): Promise<string[]> {
   const count = Math.min(128, Math.max(1, Math.floor(limit)));

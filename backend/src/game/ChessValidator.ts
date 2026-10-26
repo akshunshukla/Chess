@@ -168,13 +168,5 @@ export function gamePgn(
 }
 
 export function timeoutResult(state: GameState): GameResult {
-  const chess = restoreGame(state);
-  const winner = state.turn === "w" ? "b" : "w";
-  const hasPiece = chess
-    .board()
-    .flat()
-    .some((piece) => piece?.color === winner && piece.type !== "k");
-
-  if (!hasPiece || chess.isInsufficientMaterial()) return "draw";
-  return winner === "w" ? "white_win" : "black_win";
+  return state.turn === "w" ? "black_win" : "white_win";
 }

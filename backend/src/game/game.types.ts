@@ -22,7 +22,7 @@ export interface ValidatedMove extends MoveInput {
   outcome?: GameOutcome;
 }
 export type GameCommand =
-  | { type: "game:move"; payload: MoveInput & { gameId: string; expectedPly: number } }
+  | { type: "game:move"; payload: MoveInput & { gameId: string; expectedPly?: number } }
   | { type: "game:resign" | "game:draw:offer" | "game:reconnect"; payload: { gameId: string } }
   | { type: "game:draw:respond"; payload: { gameId: string; accept: boolean } };
 export interface GameHooks {

@@ -1,12 +1,10 @@
 export interface StockfishConfig {
   path: string;
-  poolSize: number;
+  threads: number;
   hashMb: number;
   depth: number;
   searchTimeoutMs: number;
   startupTimeoutMs: number;
-  queueTimeoutMs: number;
-  maxQueueSize: number;
 }
 
 function integer(name: string, fallback: number, min: number, max: number): number {
@@ -20,12 +18,17 @@ function integer(name: string, fallback: number, min: number, max: number): numb
 export function stockfishConfig(): StockfishConfig {
   return {
     path: process.env.STOCKFISH_PATH || "stockfish",
-    poolSize: integer("STOCKFISH_POOL_SIZE", 2, 1, 4),
+    threads: integer("STOCKFISH_THREADS", 1, 1, 64),
     hashMb: integer("STOCKFISH_HASH_MB", 64, 1, 512),
-    depth: integer("STOCKFISH_DEPTH", 20, 1, 30),
+    depth: integer("STOCKFISH_DEPTH", 12, 1, 30),
     searchTimeoutMs: integer("STOCKFISH_SEARCH_TIMEOUT_MS", 15000, 100, 120000),
     startupTimeoutMs: integer("STOCKFISH_STARTUP_TIMEOUT_MS", 10000, 100, 30000),
-    queueTimeoutMs: integer("STOCKFISH_QUEUE_TIMEOUT_MS", 60000, 100, 300000),
-    maxQueueSize: integer("STOCKFISH_MAX_QUEUE_SIZE", 128, 0, 1024),
+  };
+}
+
+export function analysisWorkerConfig() {
+  return {
+    pollMs: integer("ANALYSIS_POLL_MS", 1000, 1, 60000),
+    jobTimeoutMs: integer("ANALYSIS_JOB_TIMEOUT_MS", 300000, 1, 3600000),
   };
 }

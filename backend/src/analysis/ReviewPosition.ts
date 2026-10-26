@@ -1,7 +1,7 @@
 import { Chess, type Move, type Square } from "chess.js";
-import type { EngineEvaluation, StockfishPool } from "./StockfishPool.ts";
+import type { EngineEvaluation, StockfishEngine } from "./StockfishEngine.ts";
 
-export type ReviewEngine = Pick<StockfishPool, "evaluate">;
+export type ReviewEngine = Pick<StockfishEngine, "evaluate">;
 export type PositionEvaluator = (
   board: Chess, history: readonly string[], searchMoves?: readonly string[],
 ) => Promise<EngineEvaluation>;

@@ -9,8 +9,10 @@ authRouter.use((_req, res, next) => {
   next();
 });
 authRouter.use(json({ limit: "16kb" }));
-authRouter.post("/register", rateLimiter("auth-register", 5), register);
-authRouter.post("/login", rateLimiter("auth-login", 10), login);
-authRouter.post("/refresh", rateLimiter("auth-refresh", 20), refresh);
-authRouter.post("/logout", rateLimiter("auth-logout", 20), logout);
-authRouter.get("/me", authenticate, rateLimiter("auth-me", 60, "user"), getMe);
+const AUTH_REQUESTS_PER_MINUTE = 10;
+const authQuota = rateLimiter("auth", AUTH_REQUESTS_PER_MINUTE);
+authRouter.post("/register", authQuota, register);
+authRouter.post("/login", authQuota, login);
+authRouter.post("/refresh", authQuota, refresh);
+authRouter.post("/logout", logout);
+authRouter.get("/me", authenticate, getMe);

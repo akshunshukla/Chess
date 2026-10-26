@@ -1,19 +1,18 @@
 import { app } from "./app.ts";
 import { env } from "./config/env.ts";
-import { prisma } from "./db/prisma.ts";
-import { redis } from "./db/redis.ts";
+import { prisma, redis } from "./db/index.ts";
 import { attachWebSocketServer } from "./ws/index.ts";
-import { recoverGames, recoverMatchmaking } from "./game/index.ts";
-import { analysisQueue } from "./analysis/index.ts";
+import { abortGamesOnBoot } from "./game/index.ts";
+import { analysisWorker, failInterruptedAnalyses } from "./analysis/index.ts";
 
 const startServer = async () => {
   await prisma.$connect();
   await redis.ping();
-  await recoverGames();
-  await recoverMatchmaking();
-  await analysisQueue.start();
+  await abortGamesOnBoot();
+  await failInterruptedAnalyses();
   const server = app.listen(env.PORT, () => {
     console.log(`♟️  Chess server running on port ${env.PORT}`);
+    analysisWorker.start();
   });
   const { wss, pauseMatchmaking, stopMatchmaking } = attachWebSocketServer(server);
   server.on("error", (err) => {
@@ -26,8 +25,8 @@ const startServer = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
     pauseMatchmaking();
-    analysisQueue.pause();
-    const analysisStopped = analysisQueue.stop();
+    analysisWorker.pause();
+    const analysisStopped = analysisWorker.stop();
     const timeout = setTimeout(() => {
       console.error("Shutdown exceeded 10 secs");
       process.exit(1);

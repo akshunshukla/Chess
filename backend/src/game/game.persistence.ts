@@ -1,7 +1,6 @@
 import { prisma } from "../db/index.ts";
 import type { Prisma } from "../generated/prisma/client.ts";
 import type { WaitingGame } from "./GameService.ts";
-import { INITIAL_FEN } from "./matchmaking.types.ts";
 import { GameError, type GameState } from "./game.types.ts";
 import { serverNow } from "./game.clock.ts";
 import { EloCalculator } from "./EloCalculator.ts";
@@ -34,34 +33,10 @@ export async function activateGameRecord(id: string): Promise<{
     if (game.status === "waiting") {
       const startedAt = new Date(serverNow());
       await tx.game.update({ where: { id }, data: { status: "active", startedAt } });
-      const checkpoint = {
-        gameId: id, moveCount: 0, fen: INITIAL_FEN, movesUci: "", turn: "w" as const,
-        whiteTimeMs: game.timeControlSeconds * 1000, blackTimeMs: game.timeControlSeconds * 1000,
-      };
-      await tx.gameSnapshot.create({ data: checkpoint });
       game = { ...game, status: "active", startedAt };
     }
     if (!game.startedAt) throw new GameError("GAME_STATE_INVALID", "Active game has no start time");
     return { game, startedAt: game.startedAt.getTime() };
-  }, transactionOptions);
-}
-
-export async function saveGameSnapshot(state: GameState): Promise<void> {
-  if (state.status !== "active") return;
-  await prisma.$transaction(async (tx) => {
-    const game = await lockGame(tx, state.id);
-    if (!game) throw new GameError("GAME_NOT_FOUND", "Game record is missing");
-    if (game.status !== "active") return;
-    const checkpoint = {
-      gameId: state.id, moveCount: state.moveCount, fen: state.fen,
-      movesUci: state.moves.map((move) => move.uci).join(" "), turn: state.turn,
-      whiteTimeMs: Math.max(0, Math.ceil(state.whiteTimeMs)),
-      blackTimeMs: Math.max(0, Math.ceil(state.blackTimeMs)),
-    };
-    await tx.gameSnapshot.upsert({
-      where: { gameId_moveCount: { gameId: state.id, moveCount: state.moveCount } },
-      create: checkpoint, update: {},
-    });
   }, transactionOptions);
 }
 
@@ -116,18 +91,16 @@ export async function finalizeGameRecord(state: GameState, pgn: string): Promise
         gamesPlayed: { increment: 1 }, [counter]: { increment: 1 },
       } });
     }
-    await tx.gameSnapshot.deleteMany({ where: { gameId: state.id } });
   }, transactionOptions);
 }
 
 export async function abortActiveGameRecord(id: string): Promise<void> {
   await prisma.$transaction(async (tx) => {
     const game = await lockGame(tx, id);
-    if (!game || game.status !== "active") return;
+    if (!game || (game.status !== "active" && game.status !== "waiting")) return;
     await tx.game.update({ where: { id }, data: {
       status: "aborted", result: null, resultReason: "server_crash",
       endedAt: new Date(Math.max(serverNow(), game.startedAt?.getTime() ?? 0)),
     } });
-    await tx.gameSnapshot.deleteMany({ where: { gameId: id } });
   }, transactionOptions);
 }

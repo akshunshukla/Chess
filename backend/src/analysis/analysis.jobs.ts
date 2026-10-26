@@ -16,7 +16,6 @@ export function emptySummary() {
 }
 export interface ClaimedAnalysis {
   id: string;
-  attemptCount: number;
   startedAt: Date;
 }
 export async function lockAnalysis(tx: Prisma.TransactionClient, id: string) {
@@ -24,26 +23,22 @@ export async function lockAnalysis(tx: Prisma.TransactionClient, id: string) {
 }
 
 export async function claimAnalysis(depth: number): Promise<ClaimedAnalysis | null> {
-  return prisma.$transaction(async (tx) => {
-    const rows = await tx.$queryRaw<{ id: string }[]>`
-      SELECT id FROM "GameAnalysis" WHERE status = 'pending' AND "attemptCount" < 3
-      ORDER BY "createdAt", id FOR UPDATE SKIP LOCKED LIMIT 1`;
-    if (!rows.length) return null;
-    const id = rows[0].id;
-    await tx.moveAnalysis.deleteMany({ where: { gameAnalysisId: id } });
-    await tx.positionAnalysis.deleteMany({ where: { gameAnalysisId: id } });
-    const job = await tx.gameAnalysis.update({ where: { id }, data: {
-      ...emptySummary(), status: "processing", startedAt: new Date(), completedAt: null,
-      lastError: null, engineVersion: null, engineDepth: depth,
-      classificationVersion: REVIEW_VERSION, attemptCount: { increment: 1 },
-    }, select: { id: true, attemptCount: true, startedAt: true } });
-    return { ...job, startedAt: job.startedAt! };
-  }, transactionOptions);
+  const rows = await prisma.$queryRaw<ClaimedAnalysis[]>`
+    UPDATE "GameAnalysis"
+    SET status = 'processing', "startedAt" = date_trunc('milliseconds', clock_timestamp()),
+      "updatedAt" = NOW(), "completedAt" = NULL, "lastError" = NULL,
+      "engineVersion" = NULL, "engineDepth" = ${depth}, "classificationVersion" = ${REVIEW_VERSION}
+    WHERE id = (
+      SELECT id FROM "GameAnalysis" WHERE status = 'pending'
+      ORDER BY "createdAt", id LIMIT 1 FOR UPDATE SKIP LOCKED
+    )
+    RETURNING id, "startedAt"`;
+  return rows[0] ?? null;
 }
 
 function ownership(job: ClaimedAnalysis) {
   return { id: job.id, status: "processing" as const,
-    attemptCount: job.attemptCount, startedAt: job.startedAt };
+    startedAt: job.startedAt };
 }
 
 export async function loadAnalysisSource(job: ClaimedAnalysis) {
@@ -71,8 +66,11 @@ export async function loadAnalysisSource(job: ClaimedAnalysis) {
   return parsed;
 }
 
-export async function completeAnalysis(job: ClaimedAnalysis, result: AnalysisReviewResult, settings: string) {
+export async function completeAnalysis(
+  job: ClaimedAnalysis, result: AnalysisReviewResult, settings: string, signal?: AbortSignal,
+) {
   return prisma.$transaction(async (tx) => {
+    signal?.throwIfAborted();
     await lockAnalysis(tx, job.id);
     if (!await tx.gameAnalysis.findFirst({ where: ownership(job), select: { id: true } })) return false;
     if (result.moves.length) await tx.moveAnalysis.createMany({ data: result.moves.map((move) => ({
@@ -86,31 +84,28 @@ export async function completeAnalysis(job: ClaimedAnalysis, result: AnalysisRev
       const key = `${move.color === "w" ? "white" : "black"}${move.category[0].toUpperCase()}${move.category.slice(1)}Count`;
       counts[key] = (counts[key] ?? 0) + 1;
     }
+    signal?.throwIfAborted();
     await tx.gameAnalysis.update({ where: { id: job.id }, data: {
       ...summary, ...counts, accuracyWhite: result.accuracyWhite, accuracyBlack: result.accuracyBlack,
       engineVersion: `${result.engineVersion}; ${settings}`, status: "completed",
       completedAt: new Date(), lastError: null,
     } });
+    signal?.throwIfAborted();
     return true;
   }, transactionOptions);
 }
 
-export async function releaseAnalysis(job: ClaimedAnalysis, message: string, permanent = false) {
+export async function failAnalysis(job: ClaimedAnalysis, message: string) {
   await prisma.gameAnalysis.updateMany({ where: ownership(job), data: {
-    status: permanent || job.attemptCount >= 3 ? "failed" : "pending",
+    status: "failed",
     startedAt: null, completedAt: null, lastError: message,
   } });
 }
 
-export async function recoverStaleAnalyses() {
-  const stale = new Date(Date.now() - 10 * 60_000);
-  await prisma.$transaction(async (tx) => {
-    await tx.gameAnalysis.updateMany({ where: {
-      status: "processing", OR: [{ startedAt: { lt: stale } }, { startedAt: null }],
-      attemptCount: { lt: 3 },
-    }, data: { status: "pending", startedAt: null, lastError: "Interrupted analysis will be retried" } });
-    await tx.gameAnalysis.updateMany({ where: { attemptCount: { gte: 3 }, OR: [
-      { status: "pending" }, { status: "processing", OR: [{ startedAt: { lt: stale } }, { startedAt: null }] },
-    ] }, data: { status: "failed", startedAt: null, lastError: "Analysis attempt budget exhausted" } });
-  }, transactionOptions);
+export async function failInterruptedAnalyses() {
+  const result = await prisma.gameAnalysis.updateMany({ where: { status: "processing" }, data: {
+    status: "failed", startedAt: null, completedAt: null,
+    lastError: "Interrupted by server restart",
+  } });
+  return result.count;
 }

@@ -1,99 +1,121 @@
-import { redis } from "../db/index.ts";
 import { serverNow } from "./game.clock.ts";
-import { gameIndexes } from "./game.store.ts";
+import { DISCONNECT_GRACE_MS, type GameState } from "./game.types.ts";
 
 export interface TimerHooks {
-  run(id: string, at: number): Promise<void>;
+  run(id: string, armedForMoveCount: number): Promise<void>;
+  abandon(id: string): Promise<void>;
   sync(id: string, at: number): Promise<void>;
-  maintain?(): Promise<void>;
+  maintain(): Promise<void>;
 }
+interface ClockTimer { timer: ReturnType<typeof setTimeout>; armedForMoveCount: number }
+interface GraceTimer { timer: ReturnType<typeof setTimeout>; deadline: number }
 
 export class TimerManager {
+  private readonly timers = new Map<string, ClockTimer>();
+  private readonly graceTimers = new Map<string, GraceTimer>();
+  private readonly pending = new Set<Promise<void>>();
   private interval?: ReturnType<typeof setInterval>;
-  private inFlight?: Promise<void>;
-  private maintenance?: Promise<void>;
-  private synchronization?: Promise<void>;
-  private syncAt = 0;
-  private dueCursor = 0;
-  private syncCursor = 0;
-  private lastErrorAt = 0;
+  private tick?: Promise<void>;
+  private running = false;
 
   constructor(private readonly hooks: TimerHooks) {}
 
   start(): void {
-    if (this.interval) return;
-    this.interval = setInterval(() => this.dispatch(), 100);
+    if (this.running) return;
+    this.running = true;
+    this.interval = setInterval(() => {
+      if (this.tick) return;
+      this.tick = this.synchronize().catch(this.report).finally(() => { this.tick = undefined; });
+    }, 1000);
     this.interval.unref();
-    this.dispatch();
   }
 
-  pause(): void { clearInterval(this.interval); this.interval = undefined; }
+  arm(state: GameState): void {
+    this.clearClock(state.id);
+    if (!this.running || state.status !== "active") { this.clear(state.id); return; }
+    const remaining = state.turn === "w" ? state.whiteTimeMs : state.blackTimeMs;
+    const entry: ClockTimer = {
+      armedForMoveCount: state.moveCount,
+      timer: setTimeout(() => this.fireClock(state.id, entry), Math.max(1, state.lastMoveAt + remaining - serverNow())),
+    };
+    entry.timer.unref();
+    this.timers.set(state.id, entry);
+    this.armGrace(state);
+  }
+
+  private fireClock(id: string, entry: ClockTimer): void {
+    if (!this.running || this.timers.get(id) !== entry) return;
+    this.track(this.hooks.run(id, entry.armedForMoveCount).catch((error) => {
+      this.report(error);
+      if (this.running && this.timers.get(id) === entry) {
+        entry.timer = setTimeout(() => this.fireClock(id, entry), 1000);
+        entry.timer.unref();
+      }
+    }));
+  }
+
+  private armGrace(state: GameState): void {
+    const dates = [state.whiteDisconnectedAt, state.blackDisconnectedAt]
+      .filter((value): value is number => value !== undefined);
+    const deadline = dates.length ? Math.min(...dates) + DISCONNECT_GRACE_MS : undefined;
+    const previous = this.graceTimers.get(state.id);
+    if (previous?.deadline === deadline) return;
+    if (previous) clearTimeout(previous.timer);
+    this.graceTimers.delete(state.id);
+    if (deadline === undefined) return;
+    const entry: GraceTimer = {
+      deadline,
+      timer: setTimeout(() => this.fireGrace(state.id, entry), Math.max(1, deadline - serverNow())),
+    };
+    entry.timer.unref();
+    this.graceTimers.set(state.id, entry);
+  }
+
+  private fireGrace(id: string, entry: GraceTimer): void {
+    if (!this.running || this.graceTimers.get(id) !== entry) return;
+    this.graceTimers.delete(id);
+    this.track(this.hooks.abandon(id).catch((error) => {
+      this.report(error);
+      if (this.running && !this.graceTimers.has(id) && this.timers.has(id)) {
+        entry.timer = setTimeout(() => this.fireGrace(id, entry), 1000);
+        entry.timer.unref();
+        this.graceTimers.set(id, entry);
+      }
+    }));
+  }
+
+  private async synchronize(): Promise<void> {
+    await Promise.all([...this.timers.keys()].map(async (id) => {
+      try { await this.hooks.sync(id, serverNow()); } catch (error) { this.report(error); }
+    }));
+    if (this.running) await this.hooks.maintain();
+  }
+
+  private track(task: Promise<void>): void {
+    this.pending.add(task);
+    void task.finally(() => this.pending.delete(task));
+  }
+  private report = (error: unknown): void => { console.error("Game timer failed:", error); };
+  private clearClock(id: string): void {
+    clearTimeout(this.timers.get(id)?.timer);
+    this.timers.delete(id);
+  }
+  clear(id: string): void {
+    this.clearClock(id);
+    clearTimeout(this.graceTimers.get(id)?.timer);
+    this.graceTimers.delete(id);
+  }
+  pause(): void {
+    this.running = false;
+    clearInterval(this.interval);
+    this.interval = undefined;
+    for (const id of this.timers.keys()) this.clear(id);
+    for (const entry of this.graceTimers.values()) clearTimeout(entry.timer);
+    this.graceTimers.clear();
+  }
   async stop(): Promise<void> {
     this.pause();
-    await Promise.all([this.inFlight, this.synchronization, this.maintenance]);
-  }
-
-  private dispatch(): void {
-    if (redis.status !== "ready") return;
-    const now = serverNow();
-    if (now >= this.syncAt) {
-      this.syncAt = now + 1000;
-      if (!this.synchronization) {
-        this.synchronization = this.sync().catch((error) => this.report(error))
-          .finally(() => { this.synchronization = undefined; });
-      }
-      if (this.hooks.maintain && !this.maintenance) {
-        this.maintenance = this.hooks.maintain().catch((error) => this.report(error))
-          .finally(() => { this.maintenance = undefined; });
-      }
-    }
-    if (this.inFlight) return;
-    this.inFlight = this.tick().catch((error) => this.report(error)).finally(() => { this.inFlight = undefined; });
-  }
-
-  private report(error: unknown): void {
-    const now = serverNow();
-    if (now - this.lastErrorAt < 5000) return;
-    this.lastErrorAt = now;
-    console.error("Game timer worker failed", error);
-  }
-
-  private async each(ids: string[], callback: (id: string, at: number) => Promise<void>): Promise<void> {
-    let next = 0;
-    const worker = async () => {
-      while (next < ids.length) {
-        const id = ids[next++];
-        try { await callback(id, serverNow()); } catch (error) { this.report(error); }
-      }
-    };
-    await Promise.all(Array.from({ length: Math.min(8, ids.length) }, worker));
-  }
-
-  private async tick(): Promise<void> {
-    if (redis.status !== "ready") return;
-    const now = serverNow();
-    const due = await redis.zcount(gameIndexes.deadlines, "-inf", now);
-    if (due) {
-      const offset = this.dueCursor % due;
-      const ids = await redis.zrangebyscore(gameIndexes.deadlines, "-inf", now, "LIMIT", offset, 32);
-      this.dueCursor = (offset + 32) % due;
-      await this.each(ids, (id, at) => this.hooks.run(id, at));
-    }
-  }
-
-  private async sync(): Promise<void> {
-    const count = await redis.zcard(gameIndexes.deadlines);
-    if (!count) { this.syncCursor = 0; return; }
-    this.syncCursor %= count;
-    const until = serverNow() + 900;
-    let remaining = count;
-    while (remaining > 0 && serverNow() < until) {
-      const take = Math.min(32, remaining, count - this.syncCursor);
-      const batch = await redis.zrange(gameIndexes.deadlines, String(this.syncCursor), String(this.syncCursor + take - 1));
-      if (!batch.length) { this.syncCursor = 0; break; }
-      this.syncCursor = (this.syncCursor + batch.length) % count;
-      remaining -= batch.length;
-      await this.each(batch, (id, at) => this.hooks.sync(id, at));
-    }
+    await this.tick;
+    while (this.pending.size) await Promise.allSettled([...this.pending]);
   }
 }
