@@ -1,0 +1,126 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --font-sans: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-heading: var(--font-sans);
+  --font-mono: "SFMono-Regular", Consolas, monospace;
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-board-light: var(--board-light);
+  --color-board-dark: var(--board-dark);
+  --color-board-light-label: var(--board-light-label);
+  --color-board-dark-label: var(--board-dark-label);
+  --color-board-last-move: var(--board-last-move);
+  --color-board-check: var(--board-check);
+
+  --color-move-forced: var(--move-forced);
+  --color-move-book: var(--move-book);
+  --color-move-brilliant: var(--move-brilliant);
+  --color-move-best: var(--move-best);
+  --color-move-excellent: var(--move-excellent);
+  --color-move-good: var(--move-good);
+  --color-move-inaccuracy: var(--move-inaccuracy);
+  --color-move-mistake: var(--move-mistake);
+  --color-move-blunder: var(--move-blunder);
+
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+/* Keep the palette here: components use named tokens instead of color values. */
+:root,
+.dark {
+  color-scheme: dark;
+  --background: #191b19;
+  --foreground: #f1f3eb;
+  --card: #222522;
+  --card-foreground: var(--foreground);
+  --popover: var(--card);
+  --popover-foreground: var(--foreground);
+  --primary: #b1d780;
+  --primary-foreground: #202b16;
+  --secondary: #30372a;
+  --secondary-foreground: #e0e8d6;
+  --muted: #2b3029;
+  --muted-foreground: #a7afa2;
+  --accent: var(--secondary);
+  --accent-foreground: var(--foreground);
+  --destructive: #f08787;
+  --border: #373d33;
+  --input: #444c3e;
+  --ring: var(--primary);
+  --radius: 0.625rem;
+
+  --board-light: #e7e4cf;
+  --board-dark: #77935c;
+  --board-light-label: #3a5128;
+  --board-dark-label: #121a0d;
+  --board-last-move: #d2dc6a;
+  --board-check: #d16561;
+
+  --move-forced: #bbc1b7;
+  --move-book: #c7a5df;
+  --move-brilliant: #70d9d0;
+  --move-best: #b1d780;
+  --move-excellent: #94c48f;
+  --move-good: #b9c8a5;
+  --move-inaccuracy: #e7cf7b;
+  --move-mistake: #edab72;
+  --move-blunder: #f08787;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html {
+    @apply font-sans;
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    margin: 0;
+    min-width: 320px;
+  }
+
+  a:focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 4px;
+  }
+
+  button:not(:disabled) {
+    cursor: pointer;
+  }
+}
