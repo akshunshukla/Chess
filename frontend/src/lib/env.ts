@@ -42,6 +42,9 @@ export function getWebSocketUrl(): string {
   if (socket.protocol !== 'ws:' && socket.protocol !== 'wss:') {
     throw new Error('VITE_WS_URL must use WS, WSS, HTTP, or HTTPS.')
   }
+  if (socket.username || socket.password || socket.search || socket.hash) {
+    throw new Error('VITE_WS_URL must be a socket endpoint without credentials, query, or fragment.')
+  }
 
   return socket.href
 }
