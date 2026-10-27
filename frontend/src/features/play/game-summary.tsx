@@ -36,7 +36,7 @@ export function GameSummary({ play }: { play: PlaySnapshot }) {
   const opponent = game.color === 'w' ? game.black : game.white
   const ended = game.status === 'completed' || game.status === 'aborted'
   const title = ended ? resultText(game) : game.status === 'waiting' ? 'Opponent found' : 'Match connected'
-  const connected = connection.status === 'connected' && play.queue !== 'recovering'
+  const connected = connection.status === 'connected' && play.queue !== 'recovering' && !play.pendingMove
 
   return (
     <Card aria-labelledby="match-title" className="gap-5 p-5 [--card-spacing:0px] sm:p-6">

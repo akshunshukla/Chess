@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import { Clock3, LoaderCircle, Search, Wifi, WifiOff, X } from 'lucide-react'
 import { Link } from 'react-router'
 import { BoardPreview } from '@/components/board-preview'
@@ -12,8 +12,10 @@ import { cn } from '@/lib/utils'
 import { joinQueue, leaveQueue, reconnectPlay } from '@/stores/play-store'
 import type { PlaySnapshot } from '@/types/play'
 import { GameSummary } from './game-summary'
-import { PositionBoard } from './position-board'
+import { MoveList } from './move-list'
 import { usePlay } from './use-play'
+
+const PositionBoard = lazy(() => import('./position-board').then((module) => ({ default: module.PositionBoard })))
 
 const connectionLabels: Record<PlaySnapshot['connection']['status'], string> = {
   disconnected: 'Disconnected',
@@ -59,7 +61,7 @@ function MatchmakingCard({ play }: { play: PlaySnapshot }) {
         <p className="text-sm leading-6 text-muted-foreground">Ten minutes per player, with no increment. Find someone near your rating.</p>
 
         <p id="matchmaking-stage" className="rounded-lg border border-border bg-background/40 px-4 py-3 text-xs leading-6 text-muted-foreground">
-          Matching starts a real, rated game with running clocks. This preview connects opponents and shows the board; move controls are coming in the next step.
+          Matching starts a rated game with running clocks. Play your moves on the board once your opponent joins.
         </p>
 
         {(searching || leaving || recovering) && (
@@ -138,10 +140,15 @@ export function PlayPage() {
 
       <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1.25fr)_minmax(17rem,1fr)]">
         <div className="grid min-w-0 gap-6">
-          {game ? <PositionBoard game={game} connected={connected && play.queue !== 'recovering'} /> : <BoardPreview />}
+          {game ? (
+            <Suspense fallback={<div role="status" className="flex aspect-square w-full max-w-lg items-center justify-center justify-self-center rounded-2xl border border-border bg-card text-sm text-muted-foreground">Loading board…</div>}>
+              <PositionBoard key={game.gameId} game={game} play={play} />
+            </Suspense>
+          ) : <BoardPreview />}
           {game && <GameSummary key={game.gameId} play={play} />}
         </div>
         <div className="space-y-6">
+          {game && <MoveList game={game} />}
           <MatchmakingCard play={play} />
           <AccountSummary />
         </div>
