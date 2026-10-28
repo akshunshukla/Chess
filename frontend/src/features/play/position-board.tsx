@@ -56,7 +56,7 @@ export function PositionBoard({ game, play }: { game: PlayGame; play: PlaySnapsh
   const player = (color: 'w' | 'b') => color === 'w' ? game.white : game.black
   const ended = game.status === 'completed' || game.status === 'aborted'
   const status = ended ? 'Finished' : !connected ? 'Updates paused' : game.status === 'waiting'
-    ? 'Starting…' : play.pendingMove ? 'Confirming move…' : play.resigning ? 'Resigning…'
+    ? 'Starting…' : play.pendingMove ? 'Confirming move…' : play.resigning ? 'Resigning…' : play.drawPending ? 'Confirming draw request…'
       : game.turn === game.color ? 'Your turn' : 'Opponent’s turn'
 
   return (

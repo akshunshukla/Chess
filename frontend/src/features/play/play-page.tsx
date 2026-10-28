@@ -99,6 +99,7 @@ export function PlayPage() {
   const { user } = useSession()
   const play = usePlay()
   const { connection, game } = play
+  const resultWithoutBoard = Boolean(play.lastResult && (!game || game.status === 'aborted'))
   const connected = connection.status === 'connected'
   const needsRecovery = Boolean(play.error) && (play.queue === 'recovering' || game?.status === 'waiting')
   const canReconnect = needsRecovery || connection.status === 'disconnected' || connection.status === 'error' || connection.status === 'replaced'
@@ -140,15 +141,15 @@ export function PlayPage() {
 
       <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1.25fr)_minmax(17rem,1fr)]">
         <div className="grid min-w-0 gap-6">
-          {game ? (
+          {resultWithoutBoard ? null : game ? (
             <Suspense fallback={<div role="status" className="flex aspect-square w-full max-w-lg items-center justify-center justify-self-center rounded-2xl border border-border bg-card text-sm text-muted-foreground">Loading board…</div>}>
               <PositionBoard key={game.gameId} game={game} play={play} />
             </Suspense>
           ) : <BoardPreview />}
-          {game && <GameSummary key={game.gameId} play={play} />}
+          {(game || play.lastResult) && <GameSummary key={game?.gameId ?? play.lastResult?.gameId} play={play} />}
         </div>
         <div className="space-y-6">
-          {game && <MoveList game={game} />}
+          {game && game.status !== 'aborted' && <MoveList game={game} />}
           <MatchmakingCard play={play} />
           <AccountSummary />
         </div>

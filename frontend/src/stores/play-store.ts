@@ -170,3 +170,9 @@ export function resignGame(): void {
 export function movePiece(input: MoveInput): boolean {
   return controller?.movePiece(input) ?? false;
 }
+export function offerDraw(): void {
+  controller?.offerDraw();
+}
+export function respondToDraw(accept: boolean): void {
+  controller?.respondToDraw(accept);
+}

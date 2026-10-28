@@ -23,6 +23,8 @@ export function initialPlaySnapshot(): PlaySnapshot {
     queuedAt: null,
     game: null,
     pendingMove: null,
+    drawPending: null,
+    lastResult: null,
     notice: null,
     error: null,
     resigning: false,
@@ -39,6 +41,7 @@ export class PlayController {
   private timer: ReturnType<typeof setTimeout> | undefined;
   private rememberedId: string | null;
   private disposed = false;
+  private serverClockOffset: number | null = null;
   private readonly deps: PlayDependencies;
 
   constructor(deps: PlayDependencies) {
@@ -78,11 +81,13 @@ export class PlayController {
     this.clearTimer();
     this.timer = setTimeout(() => {
       this.timer = undefined;
-      if (this.snapshot.pendingMove) {
+      if (this.snapshot.pendingMove || this.snapshot.drawPending || this.snapshot.resigning) {
+        const moving = Boolean(this.snapshot.pendingMove);
         this.recoverGame();
         this.publish({
-          notice:
-            "The move has not been confirmed yet. Checking the latest position.",
+          notice: moving
+            ? "The move has not been confirmed yet. Checking the latest position."
+            : "The server has not confirmed your action. Checking the game state.",
         });
       } else if (recovering) {
         this.publish({
@@ -126,6 +131,7 @@ export class PlayController {
       queuedAt: null,
       resigning: false,
       pendingMove: null,
+      drawPending: null,
       notice: wasSearching
         ? "Your search stopped when the connection closed. Find an opponent again once connected."
         : this.snapshot.notice,
@@ -155,6 +161,7 @@ export class PlayController {
       queue: "joining",
       queuedAt: this.now(),
       game: null,
+      lastResult: null,
       error: null,
       notice: null,
     });
@@ -185,7 +192,8 @@ export class PlayController {
       this.snapshot.connection.status !== "connected" ||
       this.snapshot.queue !== "matched" ||
       this.snapshot.resigning ||
-      this.snapshot.pendingMove
+      this.snapshot.pendingMove ||
+      this.snapshot.drawPending
     )
       return;
     if (
@@ -201,7 +209,7 @@ export class PlayController {
   };
 
   movePiece = (input: MoveInput): boolean => {
-    const { game, connection, queue, pendingMove, resigning } = this.snapshot;
+    const { game, connection, queue, pendingMove, resigning, drawPending } = this.snapshot;
     if (
       this.disposed ||
       !game ||
@@ -209,6 +217,7 @@ export class PlayController {
       connection.status !== "connected" ||
       queue !== "matched" ||
       pendingMove ||
+      drawPending ||
       resigning ||
       game.turn !== game.color
     )
@@ -240,6 +249,34 @@ export class PlayController {
     return true;
   };
 
+  offerDraw = (): void => {
+    const game = this.snapshot.game;
+    if (!this.canSendGameAction() || !game || game.drawOfferedBy) return;
+    if (!this.deps.send({ type: "game:draw:offer", payload: { gameId: game.gameId } })) {
+      this.publish({ error: "The connection is unavailable. Reconnect before offering a draw." });
+      return;
+    }
+    this.publish({ drawPending: "offer", error: null, notice: null });
+    this.waitForResponse();
+  };
+
+  respondToDraw = (accept: boolean): void => {
+    const game = this.snapshot.game;
+    if (!this.canSendGameAction() || !game?.drawOfferedBy || game.drawOfferedBy === this.deps.user.id) return;
+    if (!this.deps.send({ type: "game:draw:respond", payload: { gameId: game.gameId, accept } })) {
+      this.publish({ error: "The connection is unavailable. Reconnect before responding to the draw." });
+      return;
+    }
+    this.publish({ drawPending: accept ? "accept" : "decline", error: null, notice: null });
+    this.waitForResponse();
+  };
+
+  private canSendGameAction(): boolean {
+    return !this.disposed && this.snapshot.game?.status === "active" &&
+      this.snapshot.connection.status === "connected" && this.snapshot.queue === "matched" &&
+      !this.snapshot.pendingMove && !this.snapshot.resigning && !this.snapshot.drawPending;
+  }
+
   private recoverGame(): void {
     if (this.snapshot.queue === "recovering" && this.timer !== undefined)
       return;
@@ -248,6 +285,7 @@ export class PlayController {
       queue: "recovering",
       queuedAt: null,
       pendingMove: null,
+      drawPending: null,
       resigning: false,
       error: null,
     });
@@ -264,8 +302,8 @@ export class PlayController {
     return { id, username: null, displayName: null, rating: null };
   }
 
-  private setGame(game: PlayGame, keepPendingMove = false): void {
-    if (!keepPendingMove) this.clearTimer();
+  private setGame(game: PlayGame, preserve?: { move: boolean; draw: boolean; resign: boolean }): void {
+    if (!preserve?.move && !preserve?.draw && !preserve?.resign) this.clearTimer();
     this.remember(isLive(game) ? game.gameId : null);
     this.publish({
       game,
@@ -273,8 +311,20 @@ export class PlayController {
       queuedAt: null,
       error: null,
       notice: null,
-      resigning: false,
-      pendingMove: keepPendingMove ? this.snapshot.pendingMove : null,
+      resigning: preserve?.resign ? this.snapshot.resigning : false,
+      pendingMove: preserve?.move ? this.snapshot.pendingMove : null,
+      drawPending: preserve?.draw ? this.snapshot.drawPending : null,
+      lastResult: isLive(game) ? null : {
+        gameId: game.gameId,
+        status: game.status === "aborted" ? "aborted" : "completed",
+        result: game.result,
+        reason: game.reason,
+        pgn: null,
+        fen: game.fen,
+        moveCount: game.moveCount,
+        ...(game.whiteTime === null ? {} : { whiteTime: game.whiteTime }),
+        ...(game.blackTime === null ? {} : { blackTime: game.blackTime }),
+      },
     });
     if (game.status === "waiting") {
       // A match can be announced just before activation fails. Do not strand it in waiting.
@@ -320,7 +370,6 @@ export class PlayController {
 
   onMessage = (message: ServerMessage): void => {
     if (this.disposed) return;
-    const payload = message.payload;
     switch (message.type) {
       case "queue:status":
         this.queueStatus(message);
@@ -347,6 +396,8 @@ export class PlayController {
           turn: "w",
           whiteTime: 600_000,
           blackTime: 600_000,
+          drawOfferedBy: null,
+          opponentDisconnectDeadline: null,
           receivedAt: this.now(),
           result: null,
           reason: null,
@@ -374,6 +425,8 @@ export class PlayController {
           turn: p.fen.split(" ")[1] === "b" ? "b" : "w",
           whiteTime: p.whiteTime,
           blackTime: p.blackTime,
+          drawOfferedBy: null,
+          opponentDisconnectDeadline: null,
           receivedAt: this.now(),
           result: null,
           reason: null,
@@ -393,13 +446,23 @@ export class PlayController {
         )
           return;
 
-        const keepPendingMove = Boolean(
-          this.snapshot.pendingMove &&
+        const sameGame = Boolean(
           this.snapshot.queue === "matched" &&
           current?.gameId === p.gameId &&
-          p.status === "active" &&
-          p.moveCount === current.moveCount,
+          p.status === "active",
         );
+        const samePosition = sameGame && p.moveCount === current?.moveCount;
+        const keepPendingMove = samePosition && Boolean(this.snapshot.pendingMove);
+        const drawPending = this.snapshot.drawPending;
+        const drawConfirmed = drawPending === "offer" ? p.drawOfferedBy === this.deps.user.id
+          : drawPending === "decline" ? !p.drawOfferedBy : false;
+        const keepDrawPending = sameGame && Boolean(drawPending) && !drawConfirmed;
+        const opponentDisconnectedAt = p.whiteId === this.deps.user.id
+          ? p.blackDisconnectedAt : p.whiteDisconnectedAt;
+        const offset = this.serverClockOffset ?? 0;
+        const estimatedRemaining = opponentDisconnectedAt === undefined ? null
+          : Math.max(0, Math.min(p.disconnectGraceMs,
+            opponentDisconnectedAt + p.disconnectGraceMs - (this.now() + offset)));
         this.setGame(
           {
             gameId: p.gameId,
@@ -419,20 +482,15 @@ export class PlayController {
             turn: p.turn,
             whiteTime: p.whiteTime,
             blackTime: p.blackTime,
+            drawOfferedBy: p.status === "active" ? p.drawOfferedBy ?? null : null,
+            opponentDisconnectDeadline: p.status === "active" && estimatedRemaining !== null
+              ? this.now() + estimatedRemaining : null,
             receivedAt: this.now(),
             result: p.result ?? null,
             reason: p.reason ?? null,
           },
-          keepPendingMove,
+          { move: keepPendingMove, draw: keepDrawPending, resign: sameGame && this.snapshot.resigning },
         );
-        const opponentDisconnected =
-          this.snapshot.game?.color === "w"
-            ? p.blackDisconnectedAt
-            : p.whiteDisconnectedAt;
-        if (opponentDisconnected !== undefined)
-          this.publish({
-            notice: "Your opponent disconnected. Waiting for them to return.",
-          });
         break;
       }
       case "game:move": {
@@ -455,6 +513,7 @@ export class PlayController {
           (pending.from !== p.from ||
             pending.to !== p.to ||
             pending.promotion !== p.promotion);
+        const moverId = game.turn === "w" ? game.white.id : game.black.id;
         // A time update is not an acknowledgment; only this move or a full resync releases the lock.
         if (pending) this.clearTimer();
         this.publish({
@@ -465,6 +524,7 @@ export class PlayController {
             : null,
           game: {
             ...game,
+            drawOfferedBy: game.drawOfferedBy === moverId ? game.drawOfferedBy : null,
             fen: p.fen,
             moveCount: p.moveCount,
             turn: p.fen.split(" ")[1] === "b" ? "b" : "w",
@@ -512,11 +572,12 @@ export class PlayController {
       case "game:over": {
         const p = message.payload;
         const game = this.snapshot.game;
+        const status = p.status === "aborted" || p.reason === "server_crash" ? "aborted" : "completed";
         if (game?.gameId === p.gameId) {
           const positionChanged = p.fen !== null && p.fen !== game.fen;
           this.setGame({
             ...game,
-            status: p.status === "aborted" ? "aborted" : "completed",
+            status,
             fen: p.fen ?? game.fen,
             moveCount: p.moveCount ?? game.moveCount,
             historyComplete:
@@ -525,10 +586,13 @@ export class PlayController {
               (p.moveCount === undefined || p.moveCount === game.moveCount),
             whiteTime: p.whiteTime ?? (positionChanged ? null : game.whiteTime),
             blackTime: p.blackTime ?? (positionChanged ? null : game.blackTime),
+            drawOfferedBy: null,
+            opponentDisconnectDeadline: null,
             result: p.result ?? null,
             reason: p.reason ?? null,
             receivedAt: this.now(),
           });
+          this.publish({ lastResult: { ...p, status } });
         } else if (this.rememberedId === p.gameId) {
           this.clearTimer();
           this.remember(null);
@@ -537,29 +601,46 @@ export class PlayController {
             game: null,
             resigning: false,
             pendingMove: null,
+            drawPending: null,
+            lastResult: { ...p, status },
             error: null,
-            notice:
-              "Your previous game has ended. You can find another opponent.",
+            notice: status === "aborted"
+              ? "Your previous game has ended. It was aborted; your rating has not changed."
+              : "Your previous game has ended. You can find another opponent.",
           });
         }
         break;
       }
-      case "game:opponent:disconnected":
-        if (
-          "gameId" in payload &&
-          this.snapshot.game?.gameId === payload.gameId
-        )
-          this.publish({
-            notice: "Your opponent disconnected. Waiting for them to return.",
-          });
+      case "game:draw:offered": {
+        const p = message.payload;
+        const game = this.snapshot.game;
+        if (!game || game.gameId !== p.gameId || game.status !== "active" ||
+          ![game.white.id, game.black.id].includes(p.offeredBy)) return;
+        const confirmed = this.snapshot.drawPending === "offer" && p.offeredBy === this.deps.user.id;
+        if (confirmed) this.clearTimer();
+        this.publish({
+          game: { ...game, drawOfferedBy: p.offeredBy },
+          drawPending: confirmed ? null : this.snapshot.drawPending,
+          error: confirmed ? null : this.snapshot.error,
+        });
         break;
-      case "game:opponent:reconnected":
-        if (
-          "gameId" in payload &&
-          this.snapshot.game?.gameId === payload.gameId
-        )
-          this.publish({ notice: "Your opponent is back." });
+      }
+      case "game:opponent:disconnected": {
+        const p = message.payload;
+        const game = this.snapshot.game;
+        if (!game || game.gameId !== p.gameId || game.status !== "active") return;
+        // The duration avoids a client/server wall-clock difference on this event.
+        this.serverClockOffset = p.deadline - p.gracePeriodMs - this.now();
+        this.publish({ game: { ...game, opponentDisconnectDeadline: this.now() + p.gracePeriodMs } });
         break;
+      }
+      case "game:opponent:reconnected": {
+        const p = message.payload;
+        const game = this.snapshot.game;
+        if (!game || game.gameId !== p.gameId || game.status !== "active") return;
+        this.publish({ game: { ...game, opponentDisconnectDeadline: null }, notice: "Your opponent is back." });
+        break;
+      }
       case "error":
         this.handleError(message.payload.code, message.payload.message);
         break;
@@ -568,7 +649,7 @@ export class PlayController {
 
   private handleError(code: string, message: string): void {
     this.clearTimer();
-    this.publish({ pendingMove: null, resigning: false });
+    this.publish({ pendingMove: null, drawPending: null, resigning: false });
     if (code === "AUTH_FAILED" || code === "AUTH_REQUIRED") return; // Socket client renews or ends the session.
     if (code === "GAME_NOT_FOUND" || code === "GAME_FORBIDDEN") {
       this.remember(null);
@@ -615,6 +696,11 @@ export class PlayController {
       this.publish({
         error: `${message} The board has returned to the last confirmed position.`,
       });
+      return;
+    }
+    if (["DRAW_PENDING", "NO_DRAW_OFFER", "GAME_DRAW_PENDING", "GAME_DRAW_MISSING"].includes(code)) {
+      this.recoverGame();
+      this.publish({ notice: "The draw offer changed. Checking its current status." });
       return;
     }
     if (code === "GAME_UNAVAILABLE") {

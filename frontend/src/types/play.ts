@@ -1,5 +1,5 @@
 import type { ConnectionSnapshot } from "../ws/realtime-client.ts";
-import type { MoveInput } from "../ws/protocol.ts";
+import type { GameOverPayload, MoveInput } from "../ws/protocol.ts";
 
 export interface PlayMove extends MoveInput {
   san: string;
@@ -25,9 +25,11 @@ export interface PlayGame {
   turn: "w" | "b";
   whiteTime: number | null;
   blackTime: number | null;
+  drawOfferedBy: string | null;
+  opponentDisconnectDeadline: number | null;
   receivedAt: number;
-  result: string | null;
-  reason: string | null;
+  result: GameOverPayload["result"];
+  reason: GameOverPayload["reason"];
 }
 
 export interface PlaySnapshot {
@@ -42,6 +44,8 @@ export interface PlaySnapshot {
   queuedAt: number | null;
   game: PlayGame | null;
   pendingMove: (MoveInput & { gameId: string; expectedPly: number }) | null;
+  drawPending: "offer" | "accept" | "decline" | null;
+  lastResult: GameOverPayload | null;
   notice: string | null;
   error: string | null;
   resigning: boolean;

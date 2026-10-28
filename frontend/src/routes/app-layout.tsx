@@ -4,6 +4,7 @@ import { Link, Navigate, Outlet } from 'react-router'
 import { BrandMark } from '@/components/brand-mark'
 import { Button } from '@/components/ui/button'
 import { useSession } from '@/features/auth/use-session'
+import { GameResultDialog } from '@/features/play/game-result-dialog'
 import { signOut } from '@/stores/session-store'
 import { retainPlayConnection } from '@/stores/play-store'
 import type { AuthUser } from '@/types/auth'
@@ -97,6 +98,7 @@ export function AppLayout() {
   return (
     <AppShell user={user} onSignOut={() => { void signOut() }}>
       <Outlet />
+      <GameResultDialog />
     </AppShell>
   )
 }

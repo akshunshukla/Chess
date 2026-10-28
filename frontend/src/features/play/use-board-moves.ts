@@ -16,7 +16,7 @@ export function useBoardMoves(game: PlayGame, play: PlaySnapshot) {
   const position = useMemo(() => readPosition(game.fen), [game.fen])
   const connected = play.connection.status === 'connected' && play.queue !== 'recovering'
   const canMove = Boolean(position) && connected && play.queue === 'matched' && game.status === 'active' &&
-    game.turn === game.color && !play.pendingMove && !play.resigning
+    game.turn === game.color && !play.pendingMove && !play.resigning && !play.drawPending
   const [selected, setSelected] = useState<Square | null>(null)
   const [promotion, setPromotion] = useState<{ from: Square; to: Square } | null>(null)
   const [message, setMessage] = useState<string | null>(null)
