@@ -15,6 +15,11 @@ function AnalysisContent({ analysisId, userId }: { analysisId: string; userId: s
   const position = job?.source.kind === 'fen'
   return (
     <div className="space-y-8">
+      <p role="status" aria-atomic="true" className="sr-only">
+        {!job ? '' : completed ? 'Analysis complete. Your results are ready.'
+          : failed ? 'Analysis could not finish. You can retry it.'
+            : job.status === 'pending' ? 'Analysis queued.' : 'Analysis in progress.'}
+      </p>
       <div className="space-y-4">
         <Link to="/analysis" className="inline-flex items-center gap-2 text-xs font-medium text-primary underline-offset-4 hover:underline"><ArrowLeft className="size-3.5" aria-hidden="true" />New analysis</Link>
         <div className="flex flex-wrap items-center gap-3">
@@ -50,7 +55,7 @@ function AnalysisContent({ analysisId, userId }: { analysisId: string; userId: s
             <span className="flex size-12 items-center justify-center rounded-full bg-primary/10 text-primary" aria-hidden="true">
               {failed ? <TriangleAlert className="size-6" /> : job.status === 'pending' ? <Clock3 className="size-6" /> : <LoaderCircle className="size-6 animate-spin motion-reduce:animate-none" />}
             </span>
-            <h2 aria-live="polite" className="text-xl font-semibold">{failed ? 'Analysis could not finish' : job.status === 'pending' ? 'Queued for analysis' : position ? 'Analysing your position…' : 'Analysing your game…'}</h2>
+            <h2 className="text-xl font-semibold">{failed ? 'Analysis could not finish' : job.status === 'pending' ? 'Queued for analysis' : position ? 'Analysing your position…' : 'Analysing your game…'}</h2>
           </CardHeader>
           <CardContent className="space-y-5">
             <p className="text-sm leading-7 text-muted-foreground">{failed

@@ -147,7 +147,7 @@ export function AuthForm({ mode, initialEmail }: AuthFormProps) {
         )}
 
         <Button type="submit" disabled={pending} className="h-11 w-full gap-2 font-semibold">
-          {pending ? <LoaderCircle className="size-4 animate-spin" aria-hidden="true" /> : <ArrowRight className="size-4" aria-hidden="true" />}
+          {pending ? <LoaderCircle className="size-4 animate-spin motion-reduce:animate-none" aria-hidden="true" /> : <ArrowRight className="size-4" aria-hidden="true" />}
           {pending ? (isRegister ? 'Creating your account…' : 'Signing in…') : (isRegister ? 'Create account' : 'Sign in')}
         </Button>
       </fieldset>

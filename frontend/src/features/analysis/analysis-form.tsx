@@ -119,7 +119,7 @@ export function AnalysisForm({ gameId, userId }: { gameId: string | null; userId
                 <><p role="alert" className="text-sm leading-6 text-destructive">{saved.error}</p><Button type="button" variant="outline" onClick={saved.retry}>Retry game details</Button></>
               ) : saved.game ? (
                 <>
-                  <p className="text-sm font-medium">{saved.game.whitePlayer.displayName || saved.game.whitePlayer.username} vs {saved.game.blackPlayer.displayName || saved.game.blackPlayer.username}</p>
+                  <p className="text-sm font-medium [overflow-wrap:anywhere]">{saved.game.whitePlayer.displayName || saved.game.whitePlayer.username} vs {saved.game.blackPlayer.displayName || saved.game.blackPlayer.username}</p>
                   <p className="text-sm leading-6 text-muted-foreground">{saved.game.status === 'completed' ? 'This completed game is ready for review.' : 'Aborted games cannot be analysed. Choose a completed game instead.'}</p>
                   <Link to={`/history/${validGameId}`} className="text-xs font-medium text-primary underline-offset-4 hover:underline">View saved game</Link>
                 </>

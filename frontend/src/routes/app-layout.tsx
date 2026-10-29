@@ -1,7 +1,8 @@
 import { Suspense, useEffect, type ReactNode } from 'react'
 import { LogOut } from 'lucide-react'
-import { Link, Navigate, Outlet } from 'react-router'
+import { Link, Navigate, Outlet, useLocation } from 'react-router'
 import { BrandMark } from '@/components/brand-mark'
+import { ErrorBoundary } from '@/components/error-boundary'
 import { Button } from '@/components/ui/button'
 import { useSession } from '@/features/auth/use-session'
 import { GameResultDialog } from '@/features/play/game-result-dialog'
@@ -10,6 +11,7 @@ import { retainPlayConnection } from '@/stores/play-store'
 import type { AuthUser } from '@/types/auth'
 import { AppNavigation } from './app-navigation'
 import { PlayActivity } from './play-activity'
+import { RouteFocus } from './route-focus'
 
 function AppBrand() {
   return (
@@ -79,7 +81,7 @@ export function AppShell({ user, children, onSignOut }: AppShellProps) {
           </div>
         </header>
 
-        <main id="app-content" tabIndex={-1} className="mx-auto w-full max-w-6xl flex-1 px-5 py-8 outline-none sm:px-8 sm:py-10 lg:px-10">
+        <main id="app-content" tabIndex={-1} className="mx-auto w-full min-w-0 max-w-6xl flex-1 px-5 py-8 outline-none sm:px-8 sm:py-10 lg:px-10">
           {children}
         </main>
         <footer className="mx-auto w-full max-w-6xl px-5 pt-6 pb-6 text-xs text-muted-foreground sm:px-8 lg:px-10">
@@ -92,12 +94,18 @@ export function AppShell({ user, children, onSignOut }: AppShellProps) {
 
 export function AppLayout() {
   const { user } = useSession()
+  const { pathname, search } = useLocation()
   useEffect(() => retainPlayConnection(), [])
   if (!user) return <Navigate to="/login" replace />
 
   return (
     <AppShell user={user} onSignOut={() => { void signOut() }}>
-      <Suspense fallback={<p role="status" className="text-sm text-muted-foreground">Loading page…</p>}><Outlet /></Suspense>
+      <ErrorBoundary key={`${pathname}${search}`}>
+        <Suspense fallback={<p role="status" className="py-8 text-sm text-muted-foreground">Loading page…</p>}>
+          <Outlet />
+          <RouteFocus />
+        </Suspense>
+      </ErrorBoundary>
       <GameResultDialog />
     </AppShell>
   )

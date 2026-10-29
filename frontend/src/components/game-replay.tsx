@@ -1,4 +1,4 @@
-import { useId, useMemo, useState, type KeyboardEvent, type ReactNode } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import { Chess, DEFAULT_POSITION } from 'chess.js'
 import { Chessboard } from 'react-chessboard'
 import { ArrowLeftRight, ChevronFirst, ChevronLast, ChevronLeft, ChevronRight, Copy } from 'lucide-react'
@@ -25,11 +25,24 @@ export function GameReplay({
   const [internalPly, setInternalPly] = useState(0)
   const [flipped, setFlipped] = useState(false)
   const [copyStatus, setCopyStatus] = useState<{ fen: string; message: string } | null>(null)
+  const moveList = useRef<HTMLOListElement>(null)
   const ply = Math.max(0, Math.min(moves.length, selectedPly ?? internalPly))
   const fen = ply === 0 ? startingFen : moves[ply - 1]?.fenAfter ?? startingFen
   const position = useMemo(() => {
     try { return new Chess(fen) } catch { return null }
   }, [fen])
+  useEffect(() => {
+    const list = moveList.current
+    if (!list) return
+    if (ply === 0) { list.scrollTop = 0; return }
+    const selected = list.querySelector('[aria-current="step"]')
+    if (!selected) return
+    const area = list.getBoundingClientRect()
+    const item = selected.getBoundingClientRect()
+    // Keep the chosen move visible without scrolling the rest of the page.
+    if (item.top < area.top) list.scrollTop -= area.top - item.top
+    else if (item.bottom > area.bottom) list.scrollTop += item.bottom - area.bottom
+  }, [ply])
   const initial = startingFen.split(' ')
   const firstMoveNumber = Number(initial[5]) || 1
   const firstBlack = initial[1] === 'b'
@@ -43,10 +56,17 @@ export function GameReplay({
     onPlyChange?.(bounded)
   }
   const navigateWithKeyboard = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.altKey || event.ctrlKey || event.metaKey || event.target !== event.currentTarget) return
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return
     const next = event.key === 'ArrowLeft' ? ply - 1 : event.key === 'ArrowRight' ? ply + 1
       : event.key === 'Home' ? 0 : event.key === 'End' ? moves.length : undefined
-    if (next !== undefined) { event.preventDefault(); changePly(next) }
+    if (next !== undefined) {
+      event.preventDefault()
+      changePly(next)
+      const panel = event.currentTarget
+      if (moveList.current && panel.contains(moveList.current)) {
+        requestAnimationFrame(() => panel.querySelector<HTMLButtonElement>('[aria-current="step"]')?.focus({ preventScroll: true }))
+      }
+    }
   }
   const copyFen = async () => {
     try {
@@ -59,11 +79,11 @@ export function GameReplay({
   const boardOrientation = flipped ? orientation === 'white' ? 'black' : 'white' : orientation
 
   return (
-    <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1.2fr)_minmax(16rem,1fr)]">
-      <Card className="w-full max-w-lg justify-self-center gap-4 overflow-hidden py-5">
+    <div className="grid min-w-0 grid-cols-1 items-start gap-6 xl:grid-cols-[minmax(0,1.2fr)_minmax(16rem,1fr)]">
+      <Card className="w-full min-w-0 max-w-lg justify-self-center gap-4 overflow-hidden py-5">
         <CardHeader className="flex flex-row items-center justify-between gap-3 px-5">
           <h2 className="text-base font-semibold">{title}</h2>
-          <Button type="button" variant="ghost" size="icon" className="size-10" aria-label="Flip board" onClick={() => setFlipped((value) => !value)}>
+          <Button type="button" variant="ghost" size="icon" className="size-10" aria-label="Flip board" aria-pressed={flipped} onClick={() => setFlipped((value) => !value)}>
             <ArrowLeftRight aria-hidden="true" />
           </Button>
         </CardHeader>
@@ -80,16 +100,19 @@ export function GameReplay({
               }} />
             </div>
           ) : <p role="alert" className="flex aspect-square items-center justify-center p-6 text-center text-sm leading-6 text-muted-foreground">This saved position could not be displayed.</p>}
-          {!positionOnly && <div className="flex items-center justify-between gap-2" role="group" aria-label="Replay controls">
-            <Button type="button" variant="outline" className="size-10" size="icon" aria-label="First position" disabled={ply === 0} onClick={() => changePly(0)}><ChevronFirst aria-hidden="true" /></Button>
-            <Button type="button" variant="outline" className="size-10" size="icon" aria-label="Previous move" disabled={ply === 0} onClick={() => changePly(ply - 1)}><ChevronLeft aria-hidden="true" /></Button>
-            <p className="min-w-0 text-center font-mono text-xs tabular-nums" role="status">{ply} / {moves.length}</p>
-            <Button type="button" variant="outline" className="size-10" size="icon" aria-label="Next move" disabled={ply === moves.length} onClick={() => changePly(ply + 1)}><ChevronRight aria-hidden="true" /></Button>
-            <Button type="button" variant="outline" className="size-10" size="icon" aria-label="Final position" disabled={ply === moves.length} onClick={() => changePly(moves.length)}><ChevronLast aria-hidden="true" /></Button>
+          {!positionOnly && <div className="grid grid-cols-[auto_auto_minmax(0,1fr)_auto_auto] items-center gap-1 sm:gap-2" role="group" aria-label="Replay controls" onKeyDown={navigateWithKeyboard}>
+            <Button type="button" variant="outline" className="size-9 sm:size-10" size="icon" aria-label="First position" disabled={ply === 0} onClick={() => changePly(0)}><ChevronFirst aria-hidden="true" /></Button>
+            <Button type="button" variant="outline" className="size-9 sm:size-10" size="icon" aria-label="Previous move" disabled={ply === 0} onClick={() => changePly(ply - 1)}><ChevronLeft aria-hidden="true" /></Button>
+            <p className="min-w-0 text-center font-mono text-[11px] tabular-nums sm:text-xs" role="status" aria-atomic="true">
+              <span aria-hidden="true">{ply} / {moves.length}</span>
+              <span className="sr-only">{ply === 0 ? 'Starting position' : `After ${moves[ply - 1]?.san}`}. Position {ply} of {moves.length}.{position ? ` ${position.turn() === 'w' ? 'White' : 'Black'} to move.` : ''}</span>
+            </p>
+            <Button type="button" variant="outline" className="size-9 sm:size-10" size="icon" aria-label="Next move" disabled={ply === moves.length} onClick={() => changePly(ply + 1)}><ChevronRight aria-hidden="true" /></Button>
+            <Button type="button" variant="outline" className="size-9 sm:size-10" size="icon" aria-label="Final position" disabled={ply === moves.length} onClick={() => changePly(moves.length)}><ChevronLast aria-hidden="true" /></Button>
           </div>}
           <p id={`${id}-instructions`} className="text-xs leading-6 text-muted-foreground">{positionOnly ? 'A single imported position. Use Flip board to view it from either side.' : 'Focus the board and use ← / → to step through moves. Home and End jump to the first and last positions.'}</p>
           <div className="space-y-2 border-t border-border pt-4">
-            <div className="flex items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <label htmlFor={`${id}-fen`} className="text-xs font-medium text-muted-foreground">Current position · FEN</label>
               <Button type="button" variant="ghost" className="h-10 gap-2" disabled={!position} onClick={() => { void copyFen() }}><Copy aria-hidden="true" />Copy FEN</Button>
             </div>
@@ -100,15 +123,15 @@ export function GameReplay({
       </Card>
       <div className="min-w-0 space-y-6">
         {renderDetails?.(ply)}
-        {!positionOnly && <Card className="gap-4 p-5 [--card-spacing:0px] sm:p-6">
+        {!positionOnly && <Card className="gap-4 p-5 [--card-spacing:0px] sm:p-6" onKeyDown={navigateWithKeyboard}>
           <CardHeader><h2 className="text-base font-semibold">Moves</h2></CardHeader>
           <CardContent className="space-y-3">
             <Button type="button" variant="ghost" className={cn('h-10 w-full justify-start', ply === 0 && 'bg-primary/10 text-primary')} aria-current={ply === 0 ? 'step' : undefined} onClick={() => changePly(0)}>Starting position</Button>
             {moves.length > 0 ? (
-              <ol className="grid max-h-96 grid-cols-2 gap-1 overflow-y-auto" aria-label="Game moves">
+              <ol ref={moveList} className="grid max-h-96 grid-cols-2 gap-1 overflow-y-auto" aria-label="Game moves">
                 {moves.map((move, index) => (
-                  <li key={index}>
-                    <Button type="button" variant="ghost" className={cn('h-10 w-full justify-start gap-2 font-mono text-sm', ply === index + 1 && 'bg-primary/15 text-primary')} aria-current={ply === index + 1 ? 'step' : undefined} onClick={() => changePly(index + 1)}>
+                  <li key={index} className="min-w-0">
+                    <Button type="button" variant="ghost" className={cn('h-10 w-full min-w-0 justify-start gap-2 px-2 font-mono text-xs sm:px-3 sm:text-sm', ply === index + 1 && 'bg-primary/15 text-primary')} aria-current={ply === index + 1 ? 'step' : undefined} onClick={() => changePly(index + 1)}>
                       <span className="text-xs text-muted-foreground">{moveLabel(index)}</span>{move.san}
                     </Button>
                   </li>
