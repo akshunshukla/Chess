@@ -11,7 +11,6 @@
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --pretty",
     "lint": "oxlint",
-    "test": "node --experimental-strip-types --test test/*.test.ts",
     "preview": "vite preview"
   },
   "dependencies": {

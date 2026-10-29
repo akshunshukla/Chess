@@ -54,7 +54,7 @@ export function WelcomePage() {
               <ArrowDownRight className="size-4" aria-hidden="true" />
             </Link>
           </Button>
-          <p className="mt-3 text-xs text-muted-foreground">Live play is on the way.</p>
+          <p className="mt-3 text-xs text-muted-foreground">Play live, revisit your games, and review your moves.</p>
 
           <div className="mt-10 flex items-center gap-3 border-t border-border pt-6">
             <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-secondary text-primary">

@@ -16,6 +16,43 @@ const serverMessages: Record<string, string> = {
   'Invalid logout input': 'Your session could not be signed out. Please try again.',
   'Invalid email or password': 'The email or password is incorrect.',
   'Username or email already in use': 'That username or email is already in use.',
+  'Invalid analysis request': 'Check the game or position you supplied and try again.',
+  'Invalid FEN characters': 'The FEN contains unsupported characters. Paste a standard chess position.',
+  'Invalid standard-chess FEN': 'That FEN is invalid. Check all six fields of the position.',
+  'Invalid castling rights': 'The FEN has invalid castling rights.',
+  'Invalid FEN counters': 'The FEN has invalid move counters.',
+  'FEN counters are too large': 'The move counters in that FEN are too large.',
+  'Invalid FEN empty-square count': 'The FEN has an invalid number of empty squares.',
+  'FEN has too many pieces or pawns': 'That position contains too many pieces or pawns.',
+  'The nonmoving king cannot be in check': 'That position is illegal: the king of the side that just moved is in check.',
+  'A king cannot face more than two checks': 'That position is illegal: a king cannot be checked by more than two pieces.',
+  'Castling rights require the original king and rook squares': 'The FEN castling rights do not match the king and rook positions.',
+  'En-passant target is inconsistent with a double pawn move': 'The FEN en passant square does not match a double pawn move.',
+  'Invalid PGN header': 'A PGN header is malformed. Check its name and quoted value.',
+  'Duplicate or excessive PGN headers': 'The PGN has duplicate headers or too many headers.',
+  'PGN variations are nested too deeply': 'The PGN has too many nested variations. Paste the main line instead.',
+  'Unbalanced PGN variation': 'A PGN variation has mismatched parentheses.',
+  'Unterminated PGN comment or variation': 'A PGN comment or variation is missing its closing bracket.',
+  'PGN exceeds 600 moves': 'That PGN is too long. Import at most 600 half-moves.',
+  'PGN exceeds 600 plies': 'That PGN is too long. Import at most 600 half-moves.',
+  'PGN contains moves after a terminal position': 'The PGN continues after the game has already ended.',
+  'PGN must be 1 to 131072 bytes': 'Paste a PGN no larger than 128 KB.',
+  'Normalized PGN exceeds 131072 bytes': 'That PGN is too large after formatting. Use a smaller game record.',
+  'PGN contains control characters': 'The PGN contains unsupported characters. Paste a plain text game record.',
+  'Only standard chess is supported': 'Only standard chess is supported. Import a game without a variant.',
+  'Invalid PGN SetUp header': 'The PGN SetUp header must be 0 or 1.',
+  'PGN SetUp requires a FEN header': 'This PGN needs a FEN header for its starting position.',
+  'PGN FEN conflicts with SetUp': 'The PGN starting position conflicts with its SetUp header.',
+  'Invalid PGN result': 'The PGN result must be 1-0, 0-1, 1/2-1/2, or *.',
+  'PGN result header and marker disagree': 'The PGN result header and final result do not match.',
+  'PGN result must match checkmate': 'The PGN result does not match the checkmate position.',
+  'PGN result conflicts with a drawn terminal position': 'The PGN result does not match the drawn final position.',
+  'Invalid PGN or FEN: moves must be legal standard chess': 'The game or position is invalid. Check that its moves are legal standard chess.',
+  'You already have three unfinished analyses': 'You already have three analyses waiting or running. Wait for one to finish before starting another.',
+  'A saved completed game is required': 'Analysis requires a completed game with a saved move record.',
+  'Only failed analyses can be retried': 'This analysis is no longer failed. Refresh its status to continue.',
+  'Analysis engine is unavailable': 'Analysis is temporarily unavailable. Please try again later.',
+  'A completed game PGN is not available': 'A PGN record is not available for this game.',
 }
 
 function responseMessage(status: number, data?: unknown): string {
@@ -40,7 +77,7 @@ function retryAfterSeconds(value: string | null): number | undefined {
   return Number.isFinite(deadline) ? Math.max(0, Math.ceil((deadline - Date.now()) / 1000)) : undefined
 }
 
-export async function requestJson(path: string, options: RequestOptions = {}): Promise<unknown> {
+async function request(path: string, options: RequestOptions, format: 'json' | 'text'): Promise<unknown> {
   let url: URL
   try {
     const base = new URL(`${getApiUrl().replace(/\/+$/, '')}/`)
@@ -64,7 +101,7 @@ export async function requestJson(path: string, options: RequestOptions = {}): P
   }, requestTimeoutMs)
 
   try {
-    const headers = new Headers({ Accept: 'application/json' })
+    const headers = new Headers({ Accept: format === 'text' ? 'application/x-chess-pgn, text/plain' : 'application/json' })
     if (options.body !== undefined) headers.set('Content-Type', 'application/json')
     if (options.token) headers.set('Authorization', `Bearer ${options.token}`)
 
@@ -85,6 +122,8 @@ export async function requestJson(path: string, options: RequestOptions = {}): P
       throw new ApiError(message, 429, retryAfter)
     }
     if (response.status === 204) return undefined
+
+    if (response.ok && format === 'text') return await response.text()
 
     let data: unknown
     try {
@@ -108,4 +147,14 @@ export async function requestJson(path: string, options: RequestOptions = {}): P
     window.clearTimeout(timeout)
     options.signal?.removeEventListener('abort', abort)
   }
+}
+
+export function requestJson(path: string, options: RequestOptions = {}): Promise<unknown> {
+  return request(path, options, 'json')
+}
+
+export async function requestText(path: string, options: RequestOptions = {}): Promise<string> {
+  const value = await request(path, options, 'text')
+  if (typeof value !== 'string') throw new ApiError('The server sent an unreadable export. Please try again.', 502)
+  return value
 }

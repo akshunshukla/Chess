@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from 'react'
+import { Suspense, useEffect, type ReactNode } from 'react'
 import { LogOut } from 'lucide-react'
 import { Link, Navigate, Outlet } from 'react-router'
 import { BrandMark } from '@/components/brand-mark'
@@ -97,7 +97,7 @@ export function AppLayout() {
 
   return (
     <AppShell user={user} onSignOut={() => { void signOut() }}>
-      <Outlet />
+      <Suspense fallback={<p role="status" className="text-sm text-muted-foreground">Loading page…</p>}><Outlet /></Suspense>
       <GameResultDialog />
     </AppShell>
   )

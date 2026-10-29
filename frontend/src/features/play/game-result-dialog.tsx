@@ -33,7 +33,7 @@ export function GameResultDialog() {
                 <Dialog.Description className="text-sm leading-6 text-muted-foreground">{gameResultDescription(lastResult)}</Dialog.Description>
               </div>
               <div className="flex flex-wrap gap-2">
-                <Dialog.Close asChild><Button asChild className="h-10"><Link to="/play">{isAborted(lastResult) ? 'Back to Play' : 'View game'}</Link></Button></Dialog.Close>
+                <Dialog.Close asChild><Button asChild className="h-10"><Link to={`/history/${encodeURIComponent(lastResult.gameId)}`}>View saved game</Link></Button></Dialog.Close>
                 <Dialog.Close asChild><Button type="button" variant="outline" className="h-10">Close</Button></Dialog.Close>
               </div>
             </>

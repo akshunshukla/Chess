@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { Link } from 'react-router'
 import { Check, Flag, Handshake, LoaderCircle, Swords } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -62,6 +63,11 @@ export function GameSummary({ play }: { play: PlaySnapshot }) {
         </dl>
 
         {ended && !aborted && user && <GameRatingSummary key={gameId} gameId={gameId} userId={user.id} />}
+
+        {ended && <div className="flex flex-wrap gap-2">
+          <Button asChild variant="outline" className="h-10"><Link to={`/history/${encodeURIComponent(gameId)}`}>View saved game</Link></Button>
+          {!aborted && <Button asChild className="h-10"><Link to={`/analysis?gameId=${encodeURIComponent(gameId)}`}>Analyse game</Link></Button>}
+        </div>}
 
         {game?.status === 'active' && game.opponentDisconnectDeadline !== null && (
           <OpponentStatus deadline={game.opponentDisconnectDeadline} connected={connection.status === 'connected'} />
