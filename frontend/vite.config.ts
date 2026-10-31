@@ -15,9 +15,10 @@ export default defineConfig(({ mode }) => {
     server: {
       port: 5173,
       strictPort: true,
-      // This proxy runs only in development. Production needs a reverse proxy.
+      // Proxy relative API, health, and socket paths during local development.
       proxy: DEV_BACKEND_URL
         ? {
+            '/health': { target: DEV_BACKEND_URL, changeOrigin: true },
             '/api': { target: DEV_BACKEND_URL, changeOrigin: true },
             '/ws': { target: DEV_BACKEND_URL, changeOrigin: true, ws: true },
           }

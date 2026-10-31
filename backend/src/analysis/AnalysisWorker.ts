@@ -16,12 +16,16 @@ export class AnalysisWorker {
   private stopping?: Promise<void>;
   private controller?: AbortController;
   private resume?: () => void;
+  private wakeVersion = 0;
   private lastErrorAt = 0;
 
   get available(): boolean { return this.running && this.engine.ready; }
 
   assertAvailable(): void {
-    if (!this.available) throw new HttpError(503, "Analysis engine is unavailable");
+    if (!this.available) {
+      this.wake();
+      throw new HttpError(503, "Analysis engine is unavailable");
+    }
   }
 
   start(): void {
@@ -33,6 +37,12 @@ export class AnalysisWorker {
 
   pause(): void {
     this.running = false;
+    this.resume?.();
+  }
+
+  wake(): void {
+    if (!this.running) return;
+    this.wakeVersion++;
     this.resume?.();
   }
 
@@ -52,12 +62,14 @@ export class AnalysisWorker {
   private async run(): Promise<void> {
     while (this.running) {
       try {
+        const version = this.wakeVersion;
         // Restart a failed/exited child before claiming the next job.
         await this.engine.start();
         if (!this.running) break;
         const job = await claimAnalysis(this.engineConfig.depth);
         if (!job) {
-          await this.sleep();
+          // A submission during the claim must trigger another sweep.
+          await this.sleep(this.config.idlePollMs, version);
           continue;
         }
         if (!this.running) {
@@ -65,26 +77,27 @@ export class AnalysisWorker {
           break;
         }
         await this.process(job);
+        await this.sleep(this.config.pollMs);
       } catch (error) {
         this.report(error);
-        if (this.running) await this.sleep();
+        if (this.running) await this.sleep(this.config.pollMs);
       }
     }
   }
 
-  private sleep(): Promise<void> {
-    if (!this.running) return Promise.resolve();
+  private sleep(ms: number, version = this.wakeVersion): Promise<void> {
+    if (!this.running || version !== this.wakeVersion) return Promise.resolve();
     return new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        this.resume = undefined;
-        resolve();
-      }, this.config.pollMs);
-      timer.unref();
+      let timer: ReturnType<typeof setTimeout> | undefined;
       this.resume = () => {
         clearTimeout(timer);
         this.resume = undefined;
         resolve();
       };
+      if (ms > 0) {
+        timer = setTimeout(this.resume, ms);
+        timer.unref();
+      }
     });
   }
 

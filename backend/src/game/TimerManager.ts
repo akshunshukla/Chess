@@ -20,6 +20,8 @@ export class TimerManager {
 
   constructor(private readonly hooks: TimerHooks) {}
 
+  get activeCount(): number { return this.timers.size; }
+
   start(): void {
     if (this.running) return;
     this.running = true;

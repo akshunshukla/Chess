@@ -1,4 +1,5 @@
 import { prisma, redis, redisOperation } from "../db/index.ts";
+import { env } from "../config/env.ts";
 import { gamePgn, timeoutResult, validateMove } from "./ChessValidator.ts";
 import { activateGameState, cleanupGame, gameIndexes, mutateGame, pendingFinalizations, readGame } from "./game.store.ts";
 import { abortActiveGameRecord, activateGameRecord, finalizeGameRecord } from "./game.persistence.ts";
@@ -17,6 +18,8 @@ export class GameManager {
   private readonly presenceRetries = new Map<string, object>();
   private readonly timerRepairs = new Set<string>();
   private readonly cancellations = new Set<string>();
+  private lastPendingCheckAt?: number;
+  private retryFinalizationsUntil = 0;
   private running = false;
 
   constructor(private readonly hooks: GameHooks) {
@@ -318,9 +321,17 @@ export class GameManager {
         }
       }
     }
-    for (const id of await pendingFinalizations(8)) {
+    const at = serverNow();
+    if (!this.timer.activeCount && at >= this.retryFinalizationsUntil &&
+      this.lastPendingCheckAt !== undefined && at - this.lastPendingCheckAt < env.IDLE_PENDING_CHECK_MS) return;
+    this.lastPendingCheckAt = at;
+    let pending: string[];
+    try { pending = await pendingFinalizations(8); }
+    catch (error) { this.retryFinalizationsUntil = serverNow() + 120_000; throw error; }
+    for (const id of pending) {
       try { await this.runExclusive(id, () => this.finalize(id)); }
       catch (error) {
+        this.retryFinalizationsUntil = serverNow() + 120_000;
         console.error("Game persistence deferred:", error);
         await redisOperation(() => redis.zadd(gameIndexes.pending, "XX", serverNow() + 2000, id));
       }
@@ -335,13 +346,18 @@ export class GameManager {
   // Called only inside runExclusive. Clearing timers precedes database I/O.
   private async finish(state: GameState): Promise<void> {
     this.timer.clear(state.id);
-    const players = await prisma.game.findUnique({ where: { id: state.id }, select: {
-      whitePlayer: { select: { username: true } }, blackPlayer: { select: { username: true } },
-    } });
-    if (!players) throw new GameError("GAME_NOT_FOUND", "Completed game record is missing");
-    const pgn = gamePgn(state, { white: players.whitePlayer.username, black: players.blackPlayer.username });
-    await finalizeGameRecord(state, pgn);
-    await cleanupGame(state);
-    this.announceEnd(state);
+    try {
+      const players = await prisma.game.findUnique({ where: { id: state.id }, select: {
+        whitePlayer: { select: { username: true } }, blackPlayer: { select: { username: true } },
+      } });
+      if (!players) throw new GameError("GAME_NOT_FOUND", "Completed game record is missing");
+      const pgn = gamePgn(state, { white: players.whitePlayer.username, black: players.blackPlayer.username });
+      await finalizeGameRecord(state, pgn);
+      await cleanupGame(state);
+      this.announceEnd(state);
+    } catch (error) {
+      this.retryFinalizationsUntil = serverNow() + 120_000;
+      throw error;
+    }
   }
 }

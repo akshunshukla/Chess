@@ -1,0 +1,16 @@
+# Install dependencies and generate Prisma inside the image.
+node_modules/
+src/generated/
+
+# Keep environment files and repository metadata out of the build context.
+.env*
+**/.env*
+.git/
+
+# Exclude local binaries, build output, logs, and OS files.
+.local/
+dist/
+build/
+*.tsbuildinfo
+*.log
+.DS_Store

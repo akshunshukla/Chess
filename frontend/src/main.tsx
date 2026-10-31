@@ -4,6 +4,9 @@ import { BrowserRouter } from 'react-router'
 import './index.css'
 import App from './App.tsx'
 import { ErrorBoundary } from './components/error-boundary.tsx'
+import { warmServer } from './lib/server-wake.ts'
+
+warmServer()
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

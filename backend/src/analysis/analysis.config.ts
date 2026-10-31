@@ -19,7 +19,7 @@ export function stockfishConfig(): StockfishConfig {
   return {
     path: process.env.STOCKFISH_PATH || "stockfish",
     threads: integer("STOCKFISH_THREADS", 1, 1, 64),
-    hashMb: integer("STOCKFISH_HASH_MB", 64, 1, 512),
+    hashMb: integer("STOCKFISH_HASH_MB", process.env.NODE_ENV === "production" ? 16 : 64, 1, 512),
     depth: integer("STOCKFISH_DEPTH", 12, 1, 30),
     searchTimeoutMs: integer("STOCKFISH_SEARCH_TIMEOUT_MS", 15000, 100, 120000),
     startupTimeoutMs: integer("STOCKFISH_STARTUP_TIMEOUT_MS", 10000, 100, 30000),
@@ -29,6 +29,7 @@ export function stockfishConfig(): StockfishConfig {
 export function analysisWorkerConfig() {
   return {
     pollMs: integer("ANALYSIS_POLL_MS", 1000, 1, 60000),
+    idlePollMs: integer("ANALYSIS_IDLE_POLL_MS", 0, 0, 3600000),
     jobTimeoutMs: integer("ANALYSIS_JOB_TIMEOUT_MS", 300000, 1, 3600000),
   };
 }

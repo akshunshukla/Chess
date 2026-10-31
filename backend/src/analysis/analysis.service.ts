@@ -18,7 +18,10 @@ async function admission(tx: Prisma.TransactionClient, userId: string) {
   } });
   if (pending >= 3) throw new HttpError(409, "You already have three unfinished analyses");
 }
-function submitted<T>(analysis: T) { return { analysis }; }
+function submitted<T extends { status: string }>(analysis: T) {
+  if (analysis.status === "pending") analysisWorker.wake();
+  return { analysis };
+}
 
 export async function requestGameAnalysis(userId: string, gameId: string) {
   analysisWorker.assertAvailable();

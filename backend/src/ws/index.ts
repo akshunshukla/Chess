@@ -1,4 +1,4 @@
-import type { Server } from "node:http";
+import type { IncomingMessage, Server } from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import { clientMessageSchema } from "./protocol.ts";
 import { createSocketAuth } from "./authenticate.ts";
@@ -28,6 +28,8 @@ import {
 import { GameError, GameManager, MatchmakingService, serverNow } from "../game/index.ts";
 import { handleGameCommand } from "./handler/game.handler.ts";
 import { createMessageLimiter } from "./tokenBucket.ts";
+import { env } from "../config/env.ts";
+import { isOriginAllowed } from "../config/origins.ts";
 
 export function attachWebSocketServer(server: Server) {
   const validate = async (userId: string, ownerId: string) => {
@@ -56,6 +58,9 @@ export function attachWebSocketServer(server: Server) {
     server,
     path: "/ws",
     maxPayload: 4 * 1024,
+    verifyClient: (info: { req: IncomingMessage }) => isOriginAllowed(
+      info.req.headers.origin, env.CORS_ORIGINS, env.NODE_ENV !== "production",
+    ),
   });
   startHeartbeat(wss);
   wss.on("error", (error) => {

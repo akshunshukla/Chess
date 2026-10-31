@@ -21,6 +21,7 @@ export class MatchmakingService {
   private passQueued = false;
   private readonly waiting = new Map<string, QueuePlayer>();
   private readonly intents = new Map<string, QueueIntent>();
+  private readonly lastPairAttempts = new WeakMap<QueuePlayer, number>();
 
   constructor(private readonly hooks: MatchmakingHooks) {}
 
@@ -159,12 +160,16 @@ export class MatchmakingService {
   private async runPass(): Promise<void> {
     for (const player of [...this.waiting.values()]) {
       if (!this.active) return;
+      const at = Date.now();
+      // Keep widening quickly at first, then reduce Redis work for long waits.
+      if (at - player.joinedAt >= 20_000 && at - (this.lastPairAttempts.get(player) ?? 0) < 5_000) continue;
       await this.tryPair(player, ratingWindow(player.joinedAt));
     }
   }
 
   private async tryPair(player: QueuePlayer, window: number): Promise<void> {
     if (this.waiting.get(player.userId) !== player) return;
+    this.lastPairAttempts.set(player, Date.now());
     const owner = this.hooks.currentOwner(player.userId);
     // A newly authenticated socket will transfer the entry in resume().
     if (owner && owner !== player.ownerId) return;
